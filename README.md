@@ -28,8 +28,8 @@ pnpm check                      # elm-review, elm-format, elm-test, vite build
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-CI builds a Linux binary on every change; Windows and Android builds are
-produced by release workflows.
+CI builds a Linux binary on every change. Windows and Android builds are
+planned as a tag-triggered release workflow (issue #15).
 
 ## Layout
 
