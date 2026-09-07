@@ -10,7 +10,8 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
 - Frontend: Elm 0.19.2 (`src/`), built by Vite with `vite-plugin-elm`.
   Elm talks to Tauri only through ports; the protocol is `src/Bridge.elm`
   and the JS side is `src/bridge.js`. Keep JS to that bridge.
-- Toolchain via `mise.toml`; run commands with `mise exec --` when the shell
+- Toolchain via `mise.toml` (rust, node, pnpm); Elm tools are pnpm
+  devDependencies. Run commands with `mise exec --` when the shell
   is not activated.
 
 ## Conventions
