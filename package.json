@@ -17,7 +17,18 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",
+    "elm": "0.19.2-0",
+    "elm-format": "0.8.8",
+    "elm-review": "2.13.5",
+    "elm-test": "0.19.2-1",
     "vite": "8.2.2",
     "vite-plugin-elm": "3.0.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "elm",
+      "elm-format",
+      "elm-test"
+    ]
   }
 }
