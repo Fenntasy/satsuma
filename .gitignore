@@ -1,0 +1,20 @@
+# Node
+node_modules/
+dist/
+
+# Elm
+elm-stuff/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Secrets
+.env
+.env.*

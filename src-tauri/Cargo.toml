@@ -1,0 +1,23 @@
+[package]
+name = "satsuma"
+version = "0.1.0"
+description = "A modern music player"
+edition = "2021"
+rust-version = "1.96"
+license = "MIT"
+
+[lib]
+name = "satsuma_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "=2.11.5", features = [] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

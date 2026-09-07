@@ -1,0 +1,23 @@
+{
+  "name": "satsuma",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "tauri": "tauri",
+    "test:elm": "elm-test",
+    "lint:elm": "elm-review && elm-format --validate src tests review/src",
+    "check": "pnpm lint:elm && pnpm test:elm && pnpm build"
+  },
+  "packageManager": "pnpm@10.26.2",
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "vite": "8.2.2",
+    "vite-plugin-elm": "3.0.1"
+  }
+}
