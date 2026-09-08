@@ -1,0 +1,133 @@
+module LibraryTest exposing (suite)
+
+import Expect
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Library exposing (ScanState(..))
+import Test exposing (Test, describe, test)
+
+
+suite : Test
+suite =
+    describe "Library"
+        [ describe "formatDuration"
+            [ test "minutes and seconds" <|
+                \_ -> Library.formatDuration 754000 |> Expect.equal "12:34"
+            , test "pads seconds" <|
+                \_ -> Library.formatDuration 65000 |> Expect.equal "1:05"
+            , test "hours" <|
+                \_ -> Library.formatDuration 3723000 |> Expect.equal "1:02:03"
+            , test "zero" <|
+                \_ -> Library.formatDuration 0 |> Expect.equal "0:00"
+            ]
+        , describe "scan summary"
+            [ test "lists only the non-zero counts" <|
+                \_ ->
+                    finishedText { added = 2, updated = 0, removed = 1, failed = 0, unreachable = 0, emptied = 0 }
+                        |> Expect.equal "Scan finished: 2 added, 1 removed"
+            , test "mentions unreachable folders" <|
+                \_ ->
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 1, unreachable = 2, emptied = 0 }
+                        |> Expect.equal "Scan finished: 1 unreadable, 2 folders unreachable"
+            , test "uses the singular for a single unreachable folder" <|
+                \_ ->
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 1, emptied = 0 }
+                        |> Expect.equal "Scan finished: 1 folder unreachable"
+            , test "explains that an empty folder kept its tracks" <|
+                \_ ->
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 0, emptied = 1 }
+                        |> Expect.equal "Scan finished: 1 folder looks empty, tracks kept"
+            , test "says nothing changed when every count is zero" <|
+                \_ ->
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 0, emptied = 0 }
+                        |> Expect.equal "Scan finished: nothing changed"
+            ]
+        , describe "handleInvokeResult"
+            [ test "list_folders fills the folders" <|
+                \_ ->
+                    json "[{\"id\":1,\"path\":\"/music\"}]"
+                        |> Result.map (\value -> Library.handleInvokeResult "list_folders" (Ok value) model)
+                        |> Expect.equal (Ok (Just ( { model | folders = [ { id = 1, path = "/music" } ] }, Cmd.none )))
+            , test "library_stats fills the stats" <|
+                \_ ->
+                    json "{\"track_count\":13000,\"total_duration_ms\":42}"
+                        |> Result.map (\value -> Library.handleInvokeResult "library_stats" (Ok value) model)
+                        |> Result.map (Maybe.map (Tuple.first >> .stats))
+                        |> Expect.equal (Ok (Just { trackCount = 13000, totalDurationMs = 42 }))
+            , test "a backend error is shown" <|
+                \_ ->
+                    Library.handleInvokeResult "add_folder" (Err "folder already in the library") model
+                        |> Maybe.map (Tuple.first >> .error)
+                        |> Expect.equal (Just (Just "folder already in the library"))
+            , test "a successful reply clears a previous error" <|
+                \_ ->
+                    json "[]"
+                        |> Result.map (\value -> Library.handleInvokeResult "list_folders" (Ok value) { model | error = Just "old" })
+                        |> Result.map (Maybe.map (Tuple.first >> .error))
+                        |> Expect.equal (Ok (Just Nothing))
+            , test "a rejected scan request leaves the panel usable" <|
+                \_ ->
+                    Library.handleInvokeResult "start_scan" (Err "no backend") model
+                        |> Maybe.map (Tuple.first >> .scan)
+                        |> Expect.equal (Just (Failed "no backend"))
+            , test "unknown commands are not ours" <|
+                \_ ->
+                    Library.handleInvokeResult "ping" (Ok Encode.null) model
+                        |> Expect.equal Nothing
+            ]
+        , describe "handleEvent"
+            [ test "progress updates the scan state" <|
+                \_ ->
+                    json "{\"scanned\":3,\"total\":10,\"path\":\"/music/a.mp3\"}"
+                        |> Result.map (\value -> Library.handleEvent "library://scan-progress" value model)
+                        |> Result.map (Maybe.map (Tuple.first >> .scan))
+                        |> Expect.equal (Ok (Just (Scanning { scanned = 3, total = 10, path = "/music/a.mp3" })))
+            , test "finished report" <|
+                \_ ->
+                    json "{\"status\":\"finished\",\"added\":1,\"updated\":2,\"removed\":3,\"failed\":0,\"unreachable\":1,\"emptied\":0}"
+                        |> Result.map (\value -> Library.handleEvent "library://scan-finished" value model)
+                        |> Result.map (Maybe.map (Tuple.first >> .scan))
+                        |> Expect.equal (Ok (Just (Finished { added = 1, updated = 2, removed = 3, failed = 0, unreachable = 1, emptied = 0 })))
+            , test "failed scan" <|
+                \_ ->
+                    json "{\"status\":\"failed\",\"message\":\"disk on fire\"}"
+                        |> Result.map (\value -> Library.handleEvent "library://scan-finished" value model)
+                        |> Result.map (Maybe.map (Tuple.first >> .scan))
+                        |> Expect.equal (Ok (Just (Failed "disk on fire")))
+            , test "an undecodable progress event does not freeze the panel" <|
+                \_ ->
+                    Library.handleEvent "library://scan-progress" Encode.null model
+                        |> Maybe.map (Tuple.first >> .scan)
+                        |> Maybe.map isFailed
+                        |> Expect.equal (Just True)
+            , test "unknown events are not ours" <|
+                \_ ->
+                    Library.handleEvent "player://tick" Encode.null model
+                        |> Expect.equal Nothing
+            ]
+        ]
+
+
+model : Library.Model
+model =
+    Tuple.first Library.init
+
+
+isFailed : Library.ScanState -> Bool
+isFailed scan =
+    case scan of
+        Failed _ ->
+            True
+
+        _ ->
+            False
+
+
+finishedText : Library.Report -> String
+finishedText =
+    Library.reportText
+
+
+json : String -> Result Decode.Error Decode.Value
+json =
+    Decode.decodeString Decode.value

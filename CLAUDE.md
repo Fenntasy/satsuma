@@ -19,17 +19,31 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
 - Pin every dependency exactly: `save-exact` for npm (enforced by `.npmrc`),
   `=x.y.z` for Cargo.
 - Music files are the source of truth for tags, ratings and grouping; the
-  SQLite database is a rebuildable cache only.
-- Grouping tag format: `A / B / C` (Type / Volume / Vibe), see issue #2.
+  SQLite database is a rebuildable cache only. What the user chose rather
+  than what was derived (the library folders) is mirrored to
+  `settings.json` in the app data directory, so recreating the cache never
+  loses it.
+- Grouping tag format: `A / B / C` (Type / Volume / Vibe); parser and
+  formatter live in `src-tauri/src/grouping.rs`. It is read from the standard
+  ID3 `TIT1` frame (lofty `ItemKey::ContentGroup`).
+- Library data flow: `scanner.rs` walks folders and skips unchanged files by
+  mtime+size, `tags.rs` reads metadata with lofty, `db.rs` is the SQLite
+  cache. Scan progress reaches Elm as Tauri events forwarded by `bridge.js`.
 - UI language: English only.
 - No "various artists" / compilation grouping in the library, ever.
 
 ## Checks before committing
 
+Run in this order: `tauri::generate_context!()` embeds `dist/`, so the Rust
+checks need a frontend build first.
+
 ```sh
 pnpm check
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
+
+Rust tests use `src-tauri/tests/fixtures/silence.mp3` (1 s of silence made
+with ffmpeg) and write tags into temp copies of it.
 
 ## Workflow for this repo
 

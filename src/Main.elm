@@ -7,6 +7,7 @@ import Html.Attributes exposing (attribute, class, classList, title, type_)
 import Html.Events exposing (onClick)
 import Json.Decode as Decode
 import Json.Encode as Encode
+import Library
 import Ports
 import Theme exposing (Mode(..), Setting(..))
 
@@ -42,6 +43,7 @@ type alias Model =
     , systemDark : Bool
     , panel : Panel
     , backend : BackendStatus
+    , library : Library.Model
     }
 
 
@@ -53,6 +55,10 @@ type BackendStatus
 
 init : Flags -> ( Model, Cmd Msg )
 init flags =
+    let
+        ( library, libraryCmd ) =
+            Library.init
+    in
     ( { theme =
             flags.theme
                 |> Maybe.andThen Theme.fromString
@@ -60,8 +66,12 @@ init flags =
       , systemDark = flags.systemDark
       , panel = Library
       , backend = Connecting
+      , library = library
       }
-    , Ports.send (Invoke "ping" (Encode.object []))
+    , Cmd.batch
+        [ Ports.send (Invoke "ping" (Encode.object []))
+        , Cmd.map LibraryMsg libraryCmd
+        ]
     )
 
 
@@ -72,6 +82,7 @@ init flags =
 type Msg
     = SelectPanel Panel
     | CycleTheme
+    | LibraryMsg Library.Msg
     | FromJs (Result Decode.Error Incoming)
 
 
@@ -89,8 +100,17 @@ update msg model =
             in
             ( { model | theme = next }, Ports.send (SaveTheme (Theme.toString next)) )
 
+        LibraryMsg libraryMsg ->
+            Library.update libraryMsg model.library
+                |> updateLibrary model
+
         FromJs (Ok (SystemTheme dark)) ->
             ( { model | systemDark = dark }, Cmd.none )
+
+        FromJs (Ok (Event name payload)) ->
+            Library.handleEvent name payload model.library
+                |> Maybe.map (updateLibrary model)
+                |> Maybe.withDefault ( model, Cmd.none )
 
         FromJs (Ok (InvokeResult "ping" (Ok payload))) ->
             ( { model
@@ -105,11 +125,18 @@ update msg model =
         FromJs (Ok (InvokeResult "ping" (Err error))) ->
             ( { model | backend = Unreachable error }, Cmd.none )
 
-        FromJs (Ok (InvokeResult _ _)) ->
-            ( model, Cmd.none )
+        FromJs (Ok (InvokeResult command outcome)) ->
+            Library.handleInvokeResult command outcome model.library
+                |> Maybe.map (updateLibrary model)
+                |> Maybe.withDefault ( model, Cmd.none )
 
         FromJs (Err error) ->
             ( { model | backend = Unreachable (Decode.errorToString error) }, Cmd.none )
+
+
+updateLibrary : Model -> ( Library.Model, Cmd Library.Msg ) -> ( Model, Cmd Msg )
+updateLibrary model ( library, cmd ) =
+    ( { model | library = library }, Cmd.map LibraryMsg cmd )
 
 
 subscriptions : Model -> Sub Msg
@@ -153,7 +180,7 @@ viewSidebar model =
             , navButton model.panel NowPlaying "Now playing"
             , navButton model.panel Playlists "Playlists"
             ]
-        , div [ class "sidebar-content" ] [ viewPanel model.panel ]
+        , div [ class "sidebar-content" ] [ viewPanel model ]
         ]
 
 
@@ -167,11 +194,11 @@ navButton current panel label =
         [ text label ]
 
 
-viewPanel : Panel -> Html Msg
-viewPanel panel =
-    case panel of
+viewPanel : Model -> Html Msg
+viewPanel model =
+    case model.panel of
         Library ->
-            placeholder "Library" "Your music, grouped by genre, artist and album."
+            Html.map LibraryMsg (Library.view model.library)
 
         NowPlaying ->
             placeholder "Now playing" "Cover art and lyrics for the current track."

@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
+const FORWARDED_EVENTS = ["library://scan-progress", "library://scan-finished"];
 
 const THEME_KEY = "satsuma.theme";
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -29,11 +32,34 @@ async function handleInvoke(app, { command, args }) {
   }
 }
 
-export function start(Elm, node) {
-  const app = Elm.Main.init({
+export async function start(Elm, node) {
+  // Register the event listeners before Elm can issue its first command,
+  // otherwise a scan that finishes immediately is never reported.
+  let app = null;
+  const buffered = [];
+  const deliver = (message) => {
+    if (app) {
+      app.ports.fromJs.send(message);
+    } else {
+      buffered.push(message);
+    }
+  };
+
+  await Promise.all(
+    FORWARDED_EVENTS.map((name) =>
+      listen(name, (event) => deliver({ tag: "event", name, payload: event.payload })).catch(
+        (error) => console.warn("[bridge] cannot listen to", name, error),
+      ),
+    ),
+  );
+
+  app = Elm.Main.init({
     node,
     flags: { theme: readTheme(), systemDark: darkQuery.matches },
   });
+  for (const message of buffered) {
+    app.ports.fromJs.send(message);
+  }
 
   app.ports.toJs.subscribe((message) => {
     switch (message.tag) {
@@ -49,7 +75,7 @@ export function start(Elm, node) {
   });
 
   darkQuery.addEventListener("change", (event) => {
-    app.ports.fromJs.send({ tag: "systemTheme", dark: event.matches });
+    deliver({ tag: "systemTheme", dark: event.matches });
   });
 
   return app;
