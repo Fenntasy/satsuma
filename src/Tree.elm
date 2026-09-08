@@ -274,23 +274,35 @@ unknown =
     "Unknown"
 
 
-{-| Groups consecutive-equal keys, keeping the order the rows came in: the
-database already sorted them.
+{-| Groups rows whose value matches once case is ignored, which is how they
+were sorted: grouping on the raw value would split "Alpha" from "ALPHA"
+into two branches that then share one path.
+
+Each group is labelled with the first spelling it met, and only rows that
+are next to each other are merged, which the sort guarantees.
+
 -}
 groupBy : (a -> String) -> List a -> List ( String, List a )
-groupBy key items =
+groupBy value items =
+    let
+        key : a -> String
+        key =
+            value >> String.toLower
+    in
     List.foldr
         (\item acc ->
             case acc of
-                ( previous, group_ ) :: rest ->
-                    if previous == key item then
-                        ( previous, item :: group_ ) :: rest
+                ( label, group_ ) :: rest ->
+                    if key item == String.toLower label then
+                        -- The first spelling wins, and folding from the
+                        -- right means the first row is met last.
+                        ( value item, item :: group_ ) :: rest
 
                     else
-                        ( key item, [ item ] ) :: acc
+                        ( value item, [ item ] ) :: acc
 
                 [] ->
-                    [ ( key item, [ item ] ) ]
+                    [ ( value item, [ item ] ) ]
         )
         []
         items

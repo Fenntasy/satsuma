@@ -62,6 +62,19 @@ suite =
                     Tree.build AlbumOnly "" split
                         |> List.concatMap .ids
                         |> Expect.equal [ 1, 2 ]
+            , test "tags that differ only in case are one branch" <|
+                \_ ->
+                    let
+                        shouty : List Tree.Row
+                        shouty =
+                            [ row 1 "Indie" "Alpha" "First" "One" (Just 1)
+                            , row 2 "Indie" "ALPHA" "First" "Two" (Just 2)
+                            , row 3 "Indie" "Alpha" "First" "Three" (Just 3)
+                            ]
+                    in
+                    Tree.build ArtistAlbum "" shouty
+                        |> labels
+                        |> Expect.equal [ "Alpha" ]
             , test "grouping by album only skips the levels above" <|
                 \_ ->
                     Tree.build AlbumOnly "" library
