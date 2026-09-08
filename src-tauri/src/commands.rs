@@ -285,9 +285,10 @@ pub fn play_library(state: State<'_, AppState>) -> Result<(), String> {
     if tracks.is_empty() {
         return Err("the library is empty; scan a folder first".to_owned());
     }
-    state
-        .player
-        .send(player::Command::Play { tracks, start: 0 })
+    state.player.send(player::Command::Play {
+        tracks,
+        start: None,
+    })
 }
 
 /// Asks the player to report where it is, e.g. when the window opens.

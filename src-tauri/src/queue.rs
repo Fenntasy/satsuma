@@ -56,15 +56,27 @@ impl Queue {
         Self::default()
     }
 
-    /// Replaces the queue and starts at `start`, which is an index into
-    /// `tracks`. Returns the track to play, if any.
+    /// Replaces the queue and starts on the track at `start`, which is an
+    /// index into `tracks`: the track the user picked plays first, even
+    /// under shuffle. Returns the track to play, if any.
     pub fn replace(&mut self, tracks: Vec<Track>, start: usize) -> Option<&Track> {
+        self.reset(tracks);
+        self.rebuild_order(Some(start));
+        self.current()
+    }
+
+    /// Replaces the queue without picking a track, so shuffle decides what
+    /// plays first. Use [`Self::start_from_beginning`] to begin.
+    pub fn replace_all(&mut self, tracks: Vec<Track>) {
+        self.reset(tracks);
+        self.rebuild_order(None);
+    }
+
+    fn reset(&mut self, tracks: Vec<Track>) {
         self.tracks = tracks;
         self.queued.clear();
         self.resume = None;
         self.stop_after_current = false;
-        self.rebuild_order(Some(start));
-        self.current()
     }
 
     /// Adds tracks at the end of the queue, keeping what is playing.
@@ -526,6 +538,32 @@ mod tests {
         assert_eq!(queue.current().map(|t| t.id), Some(1));
         assert_eq!(playing(&queue.skip_forward()), Some(2));
         assert!(matches!(queue.skip_forward(), Advance::Play(_)));
+    }
+
+    #[test]
+    fn a_shuffled_queue_does_not_always_open_on_the_same_track() {
+        // The order is random, so this checks that the first track is not
+        // pinned rather than that any particular one comes up.
+        let mut first_tracks = std::collections::HashSet::new();
+        for _ in 0..40 {
+            let mut queue = Queue::new();
+            queue.set_shuffle(true);
+            queue.replace_all(tracks(20));
+            if let Advance::Play(track) = queue.start_from_beginning() {
+                first_tracks.insert(track.id);
+            }
+        }
+        assert!(
+            first_tracks.len() > 1,
+            "shuffle must not always start on the same track"
+        );
+    }
+
+    #[test]
+    fn replacing_with_a_chosen_track_starts_on_it_even_when_shuffled() {
+        let mut queue = Queue::new();
+        queue.set_shuffle(true);
+        assert_eq!(queue.replace(tracks(10), 6).map(|t| t.id), Some(7));
     }
 
     #[test]

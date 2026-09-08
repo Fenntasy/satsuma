@@ -32,10 +32,11 @@ const MIN_PLAYTIME: Duration = Duration::from_millis(50);
 /// What the frontend can ask the player to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    /// Replace the queue and start playing at `start`.
+    /// Replace the queue and start playing. `start` is the track the user
+    /// picked; without one, shuffle decides what plays first.
     Play {
         tracks: Vec<Track>,
-        start: usize,
+        start: Option<usize>,
     },
     /// Add tracks at the end of the queue.
     Enqueue(Vec<Track>),
@@ -220,8 +221,14 @@ impl Player {
         }
         match command {
             Command::Play { tracks, start } => {
-                let track = self.queue.replace(tracks, start).cloned();
-                self.start(track.as_ref());
+                if let Some(start) = start {
+                    let track = self.queue.replace(tracks, start).cloned();
+                    self.start(track.as_ref());
+                } else {
+                    self.queue.replace_all(tracks);
+                    let advance = self.queue.start_from_beginning();
+                    self.play_advance(advance);
+                }
             }
             Command::Enqueue(tracks) => {
                 let was_empty = self.queue.is_empty();
@@ -512,7 +519,7 @@ mod tests {
         let states = drive(vec![
             Command::Play {
                 tracks: vec![track(1), track(2)],
-                start: 0,
+                start: None,
             },
             Command::SetVolume(0.5),
             Command::SetShuffle(true),
@@ -537,7 +544,7 @@ mod tests {
         let states = drive(vec![
             Command::Play {
                 tracks: vec![track(1)],
-                start: 0,
+                start: None,
             },
             Command::ReportState,
         ]);
@@ -597,7 +604,10 @@ mod tests {
             sender.send(command).expect("send");
         }
         sender
-            .send(Command::Play { tracks, start: 0 })
+            .send(Command::Play {
+                tracks,
+                start: None,
+            })
             .expect("send");
         act(&sender, &states_rx);
         let seen: Vec<State> = states_rx.try_iter().collect();
