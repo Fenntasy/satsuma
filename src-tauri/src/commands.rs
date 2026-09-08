@@ -1,6 +1,5 @@
 //! Tauri commands exposed to the frontend.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,10 +13,18 @@ pub const SCAN_PROGRESS_EVENT: &str = "library://scan-progress";
 pub const SCAN_FINISHED_EVENT: &str = "library://scan-finished";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Whether a scan is running, and whether another one was asked for while
+/// it was.
+#[derive(Debug, Default)]
+struct ScanStatus {
+    running: bool,
+    rescan_requested: bool,
+}
+
 /// Shared application state managed by Tauri.
 pub struct AppState {
     pub db: Mutex<Db>,
-    scanning: Arc<AtomicBool>,
+    scan: Arc<Mutex<ScanStatus>>,
 }
 
 impl AppState {
@@ -25,23 +32,13 @@ impl AppState {
     pub fn new(db: Db) -> Self {
         AppState {
             db: Mutex::new(db),
-            scanning: Arc::new(AtomicBool::new(false)),
+            scan: Arc::new(Mutex::new(ScanStatus::default())),
         }
-    }
-
-    fn scanning_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.scanning)
     }
 
     fn with_db<T>(&self, f: impl FnOnce(&Db) -> crate::db::Result<T>) -> Result<T, String> {
         let db = self.db.lock().map_err(|_| "database lock poisoned")?;
         f(&db).map_err(|err| err.to_string())
-    }
-}
-
-impl Drop for ScanGuard {
-    fn drop(&mut self) {
-        self.scanning.store(false, Ordering::SeqCst);
     }
 }
 
@@ -114,34 +111,74 @@ pub async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
 /// reported through [`SCAN_PROGRESS_EVENT`] and the final report through
 /// [`SCAN_FINISHED_EVENT`].
 ///
+/// When a scan is already running, another pass is queued instead: folders
+/// added meanwhile are picked up as soon as the current pass ends.
+///
 /// # Errors
 ///
-/// Returns a message when a scan is already running or the folders cannot
-/// be read.
+/// Returns a message when the scan state cannot be read.
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn start_scan(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    if state
-        .scanning
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
+    let scan = Arc::clone(&state.scan);
     {
-        return Err("a scan is already running".to_owned());
+        let mut status = scan.lock().map_err(|_| "scan state lock poisoned")?;
+        if status.running {
+            status.rescan_requested = true;
+            return Ok(());
+        }
+        status.running = true;
     }
-    let guard = ScanGuard {
-        scanning: state.inner().scanning_handle(),
-    };
-    tauri::async_runtime::spawn_blocking(move || run_scan(&app, guard));
+    tauri::async_runtime::spawn_blocking(move || run_scan(&app, ScanGuard::new(scan)));
     Ok(())
 }
 
-/// Clears the "a scan is running" flag however the scan ends.
+/// Marks the scan as finished if the scan thread panics.
 struct ScanGuard {
-    scanning: Arc<AtomicBool>,
+    scan: Arc<Mutex<ScanStatus>>,
+    handed_over: bool,
 }
 
-fn run_scan(app: &AppHandle, _guard: ScanGuard) {
+impl ScanGuard {
+    fn new(scan: Arc<Mutex<ScanStatus>>) -> Self {
+        ScanGuard {
+            scan,
+            handed_over: false,
+        }
+    }
+}
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        if !self.handed_over {
+            if let Ok(mut status) = self.scan.lock() {
+                status.running = false;
+            }
+        }
+    }
+}
+
+fn run_scan(app: &AppHandle, mut guard: ScanGuard) {
     let state = app.state::<AppState>();
+    loop {
+        scan_once(app, &state);
+        // Decide whether to run again while still holding the lock, so a
+        // request that arrives now is either seen here or starts its own
+        // scan afterwards, never dropped in between.
+        let Ok(mut status) = guard.scan.lock() else {
+            return;
+        };
+        if status.rescan_requested {
+            status.rescan_requested = false;
+            continue;
+        }
+        status.running = false;
+        guard.handed_over = true;
+        return;
+    }
+}
+
+fn scan_once(app: &AppHandle, state: &State<'_, AppState>) {
     let mut last_emit: Option<Instant> = None;
     let result = scanner::scan(&state.db, |progress: ScanProgress| {
         let done = progress.scanned == progress.total;

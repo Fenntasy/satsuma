@@ -126,8 +126,9 @@ impl Db {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        let transaction = self.conn.unchecked_transaction()?;
         if version < 1 {
-            self.conn.execute_batch(
+            transaction.execute_batch(
                 "CREATE TABLE folders (
                     id INTEGER PRIMARY KEY,
                     path TEXT NOT NULL UNIQUE
@@ -159,8 +160,10 @@ impl Db {
                 CREATE INDEX tracks_genre_artist_album ON tracks(genre, artist, album);",
             )?;
         }
-        self.conn
-            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        // The schema and the version it is stamped with must land together,
+        // otherwise a crash in between leaves an unopenable database.
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.commit()?;
         Ok(())
     }
 

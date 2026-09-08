@@ -408,10 +408,19 @@ viewFolders folders =
         ul [ class "folders" ] (List.map viewFolder folders)
 
 
+{-| Wraps a path in left-to-right marks. The path is shown with
+`direction: rtl` so it truncates on the left, which would otherwise move a
+leading slash to the end of the line.
+-}
+isolated : String -> String
+isolated path =
+    "\u{200E}" ++ path ++ "\u{200E}"
+
+
 viewFolder : Folder -> Html Msg
 viewFolder folder =
     li [ class "folder" ]
-        [ span [ class "folder-path", title folder.path ] [ text folder.path ]
+        [ span [ class "folder-path", title folder.path ] [ text (isolated folder.path) ]
         , button
             [ type_ "button"
             , class "icon-button"
