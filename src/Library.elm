@@ -163,7 +163,16 @@ handleInvokeResult command outcome model =
             Just (decodeInto (Decode.succeed ()) outcome model (\_ m -> ( { m | scan = Requested }, Cmd.batch [ refresh, startScan ] )))
 
         "start_scan" ->
-            Just (decodeInto (Decode.succeed ()) outcome model (\_ m -> ( m, Cmd.none )))
+            -- A rejected request must leave the panel usable: staying in
+            -- `Requested` would disable Rescan for good.
+            Just
+                (case outcome of
+                    Ok _ ->
+                        ( { model | error = Nothing }, Cmd.none )
+
+                    Err error ->
+                        ( { model | scan = Failed error, error = Just error }, Cmd.none )
+                )
 
         _ ->
             Nothing
@@ -191,7 +200,10 @@ handleEvent name payload model =
                         { model | scan = Scanning progressValue }
 
                     Err error ->
-                        { model | error = Just (Decode.errorToString error) }
+                        { model
+                            | scan = Failed (Decode.errorToString error)
+                            , error = Just (Decode.errorToString error)
+                        }
                 , Cmd.none
                 )
 

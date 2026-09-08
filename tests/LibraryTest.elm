@@ -65,6 +65,11 @@ suite =
                         |> Result.map (\value -> Library.handleInvokeResult "list_folders" (Ok value) { model | error = Just "old" })
                         |> Result.map (Maybe.map (Tuple.first >> .error))
                         |> Expect.equal (Ok (Just Nothing))
+            , test "a rejected scan request leaves the panel usable" <|
+                \_ ->
+                    Library.handleInvokeResult "start_scan" (Err "no backend") model
+                        |> Maybe.map (Tuple.first >> .scan)
+                        |> Expect.equal (Just (Failed "no backend"))
             , test "unknown commands are not ours" <|
                 \_ ->
                     Library.handleInvokeResult "ping" (Ok Encode.null) model
@@ -89,6 +94,12 @@ suite =
                         |> Result.map (\value -> Library.handleEvent "library://scan-finished" value model)
                         |> Result.map (Maybe.map (Tuple.first >> .scan))
                         |> Expect.equal (Ok (Just (Failed "disk on fire")))
+            , test "an undecodable progress event does not freeze the panel" <|
+                \_ ->
+                    Library.handleEvent "library://scan-progress" Encode.null model
+                        |> Maybe.map (Tuple.first >> .scan)
+                        |> Maybe.map isFailed
+                        |> Expect.equal (Just True)
             , test "unknown events are not ours" <|
                 \_ ->
                     Library.handleEvent "player://tick" Encode.null model
@@ -100,6 +111,16 @@ suite =
 model : Library.Model
 model =
     Tuple.first Library.init
+
+
+isFailed : Library.ScanState -> Bool
+isFailed scan =
+    case scan of
+        Failed _ ->
+            True
+
+        _ ->
+            False
 
 
 finishedText : Library.Report -> String

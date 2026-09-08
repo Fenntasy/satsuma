@@ -365,8 +365,19 @@ impl Db {
 fn normalize_folder(path: &str) -> String {
     std::fs::canonicalize(path).map_or_else(
         |_| path.trim_end_matches(['/', '\\']).to_owned(),
-        |real| real.to_string_lossy().into_owned(),
+        |real| strip_verbatim_prefix(&real.to_string_lossy()),
     )
+}
+
+/// Removes the `\\?\` prefix Windows canonicalisation adds. Keeping it would
+/// show `\\?\C:\Music` in the folder list and make every stored path differ
+/// from the one the user knows.
+fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        // `\\?\UNC\server\share` is the share `\\server\share`.
+        return format!(r"\\{rest}");
+    }
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
 }
 
 /// Moves an unusable cache out of the way, keeping it for inspection under a
@@ -454,6 +465,16 @@ mod tests {
             stamp: stamp(path),
             tags,
         }
+    }
+
+    #[test]
+    fn windows_verbatim_prefixes_are_stripped() {
+        use super::strip_verbatim_prefix;
+
+        assert_eq!(strip_verbatim_prefix(r"\\?\C:\Music"), r"C:\Music");
+        assert_eq!(strip_verbatim_prefix(r"\\?\UNC\nas\music"), r"\\nas\music");
+        assert_eq!(strip_verbatim_prefix("/Users/me/Music"), "/Users/me/Music");
+        assert_eq!(strip_verbatim_prefix(r"C:\Music"), r"C:\Music");
     }
 
     #[test]
