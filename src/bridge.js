@@ -26,13 +26,38 @@ function saveTheme(value) {
   }
 }
 
+/**
+ * A command rejects with whatever the backend returned, which is a string
+ * today but need not be: anything else is shown as JSON rather than as
+ * "[object Object]".
+ */
+function describeError(error) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  try {
+    // `JSON.stringify` answers `undefined` rather than throwing for some
+    // values, and the port needs a string.
+    return JSON.stringify(error) ?? String(error);
+  } catch {
+    return String(error);
+  }
+}
+
 async function handleInvoke(app, { command, args }) {
   try {
     const payload = await invoke(command, args);
     app.ports.fromJs.send({ tag: "invokeResult", command, ok: true, payload });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    app.ports.fromJs.send({ tag: "invokeResult", command, ok: false, error: message });
+    app.ports.fromJs.send({
+      tag: "invokeResult",
+      command,
+      ok: false,
+      error: describeError(error),
+    });
   }
 }
 

@@ -39,6 +39,18 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
 - UI language: English only.
 - No "various artists" / compilation grouping in the library, ever.
 
+## Testing the frontend
+
+`pnpm test:e2e` needs a browser: run `pnpm exec playwright install chromium`
+once after cloning, or `pnpm check` fails on the end-to-end step.
+
+`tests/e2e` drives the real frontend in a browser through Playwright, with
+`tests/e2e/tauri-stub.js` standing in for the Tauri host: it implements
+`invoke` and the event callbacks, so the page runs unchanged. Use it to
+check what commands a control sends and what the UI does with the state
+events sent back. This is the layer where a renamed command or an event
+that is never forwarded would otherwise pass every other test.
+
 ## Checks before committing
 
 Run in this order: `tauri::generate_context!()` embeds `dist/`, so the Rust

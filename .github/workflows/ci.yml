@@ -48,6 +48,12 @@ jobs:
       - name: Frontend build
         run: pnpm build
 
+      - name: Install the browser for the end-to-end tests
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: End-to-end tests
+        run: pnpm test:e2e
+
       - name: Rust format
         run: cargo fmt --check
         working-directory: src-tauri
