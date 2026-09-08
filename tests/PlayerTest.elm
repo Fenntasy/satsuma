@@ -78,6 +78,22 @@ suite =
                     Player.handleEvent "library://scan-finished" Encode.null model
                         |> Expect.equal Nothing
             ]
+        , describe "seek preview"
+            [ test "is held until the backend says it seeked" <|
+                \_ ->
+                    seeking (stateWithSeeks 0)
+                        |> Expect.equal (Just 30000)
+            , test "ends when the backend reports another seek" <|
+                \_ ->
+                    seeking (stateWithSeeks 1)
+                        |> Expect.equal Nothing
+            , test "survives a seek the format refused" <|
+                \_ ->
+                    -- The position never reaches the one asked for, so only
+                    -- the counter can end the preview.
+                    seeking (stateWithSeeks 0)
+                        |> Expect.equal (Just 30000)
+            ]
         , describe "handleInvokeResult"
             [ test "a player error is shown" <|
                 \_ ->
@@ -105,6 +121,40 @@ suite =
 model : Player.Model
 model =
     Tuple.first Player.init
+
+
+{-| Asks for a seek, then feeds back a state event and reports the preview
+that is left.
+-}
+seeking : String -> Maybe Int
+seeking json =
+    Decode.decodeString Decode.value json
+        |> Result.toMaybe
+        |> Maybe.andThen
+            (\payload ->
+                Player.update (Player.SeekTo 30000) model
+                    |> Tuple.first
+                    |> Player.handleEvent "player://state" payload
+            )
+        |> Maybe.map (Tuple.first >> .seeking)
+        |> Maybe.withDefault (Just -1)
+
+
+stateWithSeeks : Int -> String
+stateWithSeeks applied =
+    """
+    { "status": "playing"
+    , "track": null
+    , "position_ms": 0
+    , "volume": 1.0
+    , "shuffle": false
+    , "repeat": "off"
+    , "stop_after_current": false
+    , "queue_length": 1
+    , "seeks_applied": """ ++ String.fromInt applied ++ """
+    , "error": null
+    }
+    """
 
 
 {-| Decodes a state event and returns the resulting state, or `Nothing` when

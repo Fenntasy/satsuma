@@ -60,6 +60,9 @@ impl Queue {
     /// index into `tracks`: the track the user picked plays first, even
     /// under shuffle. Returns the track to play, if any.
     pub fn replace(&mut self, tracks: Vec<Track>, start: usize) -> Option<&Track> {
+        if start >= tracks.len() {
+            return None;
+        }
         self.reset(tracks);
         self.rebuild_order(Some(start));
         self.current()
@@ -216,15 +219,17 @@ impl Queue {
     /// Jumps to a track by its index in the queue as the user sees it.
     /// The queue carries on from there, so anything queued to play next
     /// keeps its place but the point to resume from is forgotten.
+    ///
+    /// An index that is not in the queue changes nothing, like
+    /// [`Self::play_next`]: a stale index from the frontend must not stop
+    /// the music.
     pub fn jump_to(&mut self, index: usize) -> Advance {
+        let Some(cursor) = self.order.iter().position(|&item| item == index) else {
+            return self.play_current();
+        };
         self.resume = None;
-        match self.order.iter().position(|&item| item == index) {
-            Some(cursor) => {
-                self.cursor = Some(cursor);
-                self.play_current()
-            }
-            None => Advance::Stop,
-        }
+        self.cursor = Some(cursor);
+        self.play_current()
     }
 
     /// The ids of the tracks lined up after the current one, in playing
@@ -291,13 +296,7 @@ impl Queue {
             }
         }
         self.order = order;
-        self.cursor = match keep {
-            Some(keep) => self.order.iter().position(|&index| index == keep),
-            None => None,
-        };
-        if self.cursor.is_none() && !self.order.is_empty() && keep.is_some() {
-            self.cursor = Some(0);
-        }
+        self.cursor = keep.and_then(|keep| self.order.iter().position(|&index| index == keep));
     }
 }
 
@@ -589,7 +588,18 @@ mod tests {
         let mut queue = queue_of(4);
         assert_eq!(playing(&queue.jump_to(2)), Some(3));
         assert_eq!(queue.current_index(), Some(2));
-        assert_eq!(queue.jump_to(99), Advance::Stop);
+        assert_eq!(
+            playing(&queue.jump_to(99)),
+            Some(3),
+            "an index that is not in the queue changes nothing"
+        );
+    }
+
+    #[test]
+    fn replacing_with_a_start_outside_the_queue_plays_nothing() {
+        let mut queue = Queue::new();
+        assert_eq!(queue.replace(tracks(3), 9).map(|track| track.id), None);
+        assert_eq!(queue.replace(Vec::new(), 0).map(|track| track.id), None);
     }
 
     #[test]

@@ -342,7 +342,8 @@ impl Db {
             "SELECT id, path, title, artist, album, duration_ms
              FROM tracks
              ORDER BY artist IS NULL, artist, album IS NULL, album,
-                      disc_number, track_number, title
+                      disc_number IS NULL, disc_number,
+                      track_number IS NULL, track_number, title
              LIMIT ?1",
         )?;
         let limit = limit.map_or(-1, i64::from);
@@ -608,6 +609,18 @@ mod tests {
                 ..TrackTags::default()
             },
         };
+        let entry_without_number =
+            |path: &str, artist: &str, album: &str, title: &str| TrackRecord {
+                folder_id: folder.id,
+                stamp: stamp(path),
+                tags: TrackTags {
+                    title: Some(title.to_owned()),
+                    artist: Some(artist.to_owned()),
+                    album: Some(album.to_owned()),
+                    duration_ms: 1000,
+                    ..TrackTags::default()
+                },
+            };
         db.upsert_tracks(&[
             entry("/music/c.mp3", "Beta", "Second", 1, "C"),
             entry("/music/b.mp3", "Alpha", "First", 2, "B"),
@@ -623,6 +636,18 @@ mod tests {
             .collect();
         assert_eq!(titles, ["A", "B", "C"]);
         assert_eq!(db.list_tracks(Some(2)).expect("list").len(), 2);
+
+        // Within an album, an untagged track number sorts after the
+        // numbered ones rather than ahead of track 1.
+        db.upsert_tracks(&[entry_without_number("/music/z.mp3", "Alpha", "First", "Z")])
+            .expect("upsert");
+        let titles: Vec<String> = db
+            .list_tracks(None)
+            .expect("list")
+            .into_iter()
+            .filter_map(|track| track.title)
+            .collect();
+        assert_eq!(titles, ["A", "B", "Z", "C"]);
 
         // A track with no artist sorts after the ones that have any.
         db.upsert_tracks(&[TrackRecord {
@@ -641,7 +666,7 @@ mod tests {
             .into_iter()
             .filter_map(|track| track.title)
             .collect();
-        assert_eq!(titles, ["A", "B", "C", "D"]);
+        assert_eq!(titles, ["A", "B", "Z", "C", "D"]);
     }
 
     #[test]

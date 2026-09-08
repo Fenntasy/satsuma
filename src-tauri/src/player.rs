@@ -263,8 +263,12 @@ impl Player {
             }
             Command::Seek(position) => self.seek(position),
             Command::SetVolume(volume) => {
-                self.volume = volume.clamp(0.0, 1.0);
-                self.sink.set_volume(self.volume);
+                // NaN survives `clamp`, silences the sink and serialises as
+                // null, which the frontend cannot decode at all.
+                if volume.is_finite() {
+                    self.volume = volume.clamp(0.0, 1.0);
+                    self.sink.set_volume(self.volume);
+                }
             }
             Command::SetShuffle(shuffle) => self.queue.set_shuffle(shuffle),
             Command::SetRepeat(repeat) => self.queue.set_repeat(repeat),
@@ -637,6 +641,23 @@ mod tests {
         None
     }
 
+    /// A file that decodes but is over almost immediately, which is what a
+    /// tag-only or truncated file behaves like.
+    fn near_silent(id: i64) -> Track {
+        Track {
+            id,
+            path: concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/near-silent.mp3"
+            )
+            .to_owned(),
+            title: Some("Almost nothing".to_owned()),
+            artist: None,
+            album: None,
+            duration_ms: 1,
+        }
+    }
+
     fn fixture(id: i64) -> Track {
         Track {
             id,
@@ -739,6 +760,28 @@ mod tests {
                 "a file skipped earlier must not still be reported"
             );
         });
+        if played.is_none() {
+            eprintln!("skipped: this machine has no audio output");
+        }
+    }
+
+    #[test]
+    fn a_queue_of_tracks_that_play_nothing_stops_instead_of_spinning() {
+        let played = with_audio_setup(
+            vec![Command::SetRepeat(Repeat::Queue)],
+            (1..=3).map(near_silent).collect(),
+            |_sender, states| {
+                let stopped = wait_for(states, Duration::from_secs(10), |state| {
+                    state.status == Status::Stopped && state.error.is_some()
+                })
+                .expect("files that decode but hold no audio must not loop for ever");
+                assert_eq!(
+                    stopped.error.as_deref(),
+                    Some("these files hold no audio to play"),
+                    "the playtime budget must be what stopped it, not a decode failure"
+                );
+            },
+        );
         if played.is_none() {
             eprintln!("skipped: this machine has no audio output");
         }

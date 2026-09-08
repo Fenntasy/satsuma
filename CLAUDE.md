@@ -56,7 +56,8 @@ with ffmpeg) and write tags into temp copies of it.
 
 - One GitHub issue per feature; branch `type/<issue>-<slug>`; PR body uses
   `Fixes #N`.
-- Roborev runs in auto mode here: fix findings and loop until only low
-  severity remains, then commit, push, wait for CI and squash merge.
+- Roborev runs in auto mode here, see `.claude/rules/roborev-loop.md`: fix
+  what is worth fixing, re-review only while findings above low remain, then
+  commit, push, wait for CI and squash merge.
 - Never mention Claude, AI or LLMs in commits, PR titles/bodies or branch
   names.

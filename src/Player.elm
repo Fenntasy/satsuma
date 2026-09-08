@@ -1,6 +1,6 @@
 module Player exposing
     ( Model
-    , Msg
+    , Msg(..)
     , Repeat(..)
     , State
     , Status(..)
