@@ -1,5 +1,6 @@
 //! Reading metadata out of audio files with `lofty`.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use lofty::file::TaggedFileExt;
@@ -38,12 +39,24 @@ pub struct TrackTags {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TagError {
-    #[error("cannot read {path}: {source}")]
+    #[error("cannot read {path}: {}", causes(.source))]
     Read {
         path: String,
         #[source]
         source: lofty::error::FileParseError,
     },
+}
+
+/// The whole cause chain of an error, so the log says what actually went
+/// wrong: lofty's own message is only "failed to parse Mpeg file".
+fn causes(err: &dyn std::error::Error) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        write!(message, ": {cause}").expect("writing to a String cannot fail");
+        source = cause.source();
+    }
+    message
 }
 
 /// Returns true when the path has an audio file extension.
@@ -226,5 +239,18 @@ pub(crate) mod tests {
     #[test]
     fn unreadable_path_is_an_error() {
         assert!(read_tags(Path::new("/definitely/missing.mp3")).is_err());
+    }
+
+    #[test]
+    fn the_error_message_says_what_went_wrong() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("broken.mp3");
+        std::fs::write(&path, b"not an mp3 at all").expect("write");
+        let message = read_tags(&path).expect_err("must fail").to_string();
+        assert!(message.contains("broken.mp3"), "{message}");
+        assert!(
+            message.matches(':').count() >= 2,
+            "the underlying cause must be included: {message}"
+        );
     }
 }

@@ -256,6 +256,37 @@ mod tests {
         assert_eq!(Grouping::default().stored_names(), (None, None, None));
     }
 
+    /// The database is written with `stored_names` and read back with serde,
+    /// so the two spellings have to agree for every variant.
+    #[test]
+    fn stored_names_match_the_labels_and_serde() {
+        let all = [
+            grouping(Some(Kind::Chant), Some(Volume::Soft), Some(Vibe::Happy)),
+            grouping(Some(Kind::Chant), Some(Volume::Loud), Some(Vibe::Sad)),
+            grouping(Some(Kind::Instru), Some(Volume::Soft), Some(Vibe::Dark)),
+            grouping(Some(Kind::Instru), Some(Volume::Loud), Some(Vibe::Mix)),
+        ];
+        for value in all {
+            let (kind, volume, vibe) = value.stored_names();
+            let labels = [
+                (kind, value.kind.map(Kind::label)),
+                (volume, value.volume.map(Volume::label)),
+                (vibe, value.vibe.map(Vibe::label)),
+            ];
+            for (stored, label) in labels {
+                assert_eq!(stored.map(str::to_owned), label.map(str::to_lowercase));
+            }
+            let json = [
+                (kind, serde_json::to_value(value.kind).expect("json")),
+                (volume, serde_json::to_value(value.volume).expect("json")),
+                (vibe, serde_json::to_value(value.vibe).expect("json")),
+            ];
+            for (stored, serialized) in json {
+                assert_eq!(stored, serialized.as_str());
+            }
+        }
+    }
+
     #[test]
     fn display_round_trips_through_parse() {
         let kinds = [None, Some(Kind::Chant), Some(Kind::Instru)];

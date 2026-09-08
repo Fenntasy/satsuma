@@ -26,10 +26,13 @@ pub struct ScanReport {
     pub removed: u64,
     /// Audio files whose tags could not be read.
     pub failed: u64,
-    /// Folders that could not be read, or that came back empty while the
-    /// cache holds tracks for them. They are left untouched instead of
-    /// having their tracks pruned.
+    /// Folders that could not be read. Their tracks are left alone instead
+    /// of being pruned.
     pub unreachable: u64,
+    /// Folders that hold no audio file although the cache has tracks for
+    /// them, which usually means a drive or share is not mounted. Their
+    /// tracks are kept.
+    pub emptied: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,7 +191,7 @@ fn load_known(
                     folder.path,
                     stamps.len()
                 );
-                report.unreachable += 1;
+                report.emptied += 1;
             }
             for stamp in stamps {
                 known.insert(stamp.path.clone(), (folder.id, stamp));
@@ -506,7 +509,7 @@ mod tests {
         assert_eq!(
             report,
             ScanReport {
-                unreachable: 1,
+                emptied: 1,
                 ..ScanReport::default()
             }
         );
@@ -559,6 +562,23 @@ mod tests {
         let (_dir, db) = setup();
         let (report, _) = scan_all(&db);
         assert_eq!(report, ScanReport::default());
+    }
+
+    #[test]
+    fn a_cached_track_that_becomes_unreadable_is_kept() {
+        let (dir, db) = setup();
+        let path = dir.path().join("song.mp3");
+        fs::copy(FIXTURE, &path).expect("copy");
+        fs::copy(FIXTURE, dir.path().join("other.mp3")).expect("copy");
+        let (report, _) = scan_all(&db);
+        assert_eq!(report.added, 2);
+
+        // The file is still there but its content is now garbage.
+        fs::write(&path, b"corrupted beyond repair").expect("corrupt");
+        let (report, _) = scan_all(&db);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.removed, 0, "an unreadable track must not be pruned");
+        assert_eq!(track_count(&db), 2, "its cached row must survive");
     }
 
     #[test]

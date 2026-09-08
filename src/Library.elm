@@ -57,11 +57,14 @@ type alias Report =
     , removed : Int
     , failed : Int
     , unreachable : Int
+    , emptied : Int
     }
 
 
 type ScanState
-    = Idle
+    = -- Asked for, but the backend has not reported progress yet: it is
+      -- still walking the folders.
+      Requested
     | Scanning Progress
     | Finished Report
     | Failed String
@@ -79,7 +82,7 @@ init : ( Model, Cmd Msg )
 init =
     ( { folders = []
       , stats = { trackCount = 0, totalDurationMs = 0 }
-      , scan = Idle
+      , scan = Requested
       , error = Nothing
       }
     , Cmd.batch [ refresh, startScan ]
@@ -121,7 +124,7 @@ update msg model =
             )
 
         StartScan ->
-            ( model, startScan )
+            ( { model | scan = Requested }, startScan )
 
 
 {-| Handles the reply of a command this panel issued. Returns `Nothing` when
@@ -152,12 +155,12 @@ handleInvokeResult command outcome model =
                 )
 
         "add_folder" ->
-            Just (decodeInto folderDecoder outcome model (\_ m -> ( m, Cmd.batch [ refresh, startScan ] )))
+            Just (decodeInto folderDecoder outcome model (\_ m -> ( { m | scan = Requested }, Cmd.batch [ refresh, startScan ] )))
 
         "remove_folder" ->
             -- Rescan too: tracks shared with a folder that is still in the
             -- library go away with the removed one and must come back.
-            Just (decodeInto (Decode.succeed ()) outcome model (\_ m -> ( m, Cmd.batch [ refresh, startScan ] )))
+            Just (decodeInto (Decode.succeed ()) outcome model (\_ m -> ( { m | scan = Requested }, Cmd.batch [ refresh, startScan ] )))
 
         "start_scan" ->
             Just (decodeInto (Decode.succeed ()) outcome model (\_ m -> ( m, Cmd.none )))
@@ -241,12 +244,13 @@ outcomeDecoder =
                 case status of
                     "finished" ->
                         Decode.map Finished
-                            (Decode.map5 Report
+                            (Decode.map6 Report
                                 (Decode.field "added" Decode.int)
                                 (Decode.field "updated" Decode.int)
                                 (Decode.field "removed" Decode.int)
                                 (Decode.field "failed" Decode.int)
                                 (Decode.field "unreachable" Decode.int)
+                                (Decode.field "emptied" Decode.int)
                             )
 
                     "failed" ->
@@ -333,6 +337,9 @@ formatDuration ms =
 isScanning : ScanState -> Bool
 isScanning scan =
     case scan of
+        Requested ->
+            True
+
         Scanning _ ->
             True
 
@@ -343,8 +350,8 @@ isScanning scan =
 viewScan : ScanState -> Html Msg
 viewScan scan =
     case scan of
-        Idle ->
-            text ""
+        Requested ->
+            p [ class "scan-summary" ] [ text "Looking for music…" ]
 
         Scanning { scanned, total, path } ->
             div [ class "scan" ]
@@ -384,6 +391,13 @@ reportText report =
 
                      else
                         "folders unreachable"
+                    )
+                |> counted report.emptied
+                    (if report.emptied == 1 then
+                        "folder looks empty, tracks kept"
+
+                     else
+                        "folders look empty, tracks kept"
                     )
                 |> List.reverse
                 |> String.join ", "

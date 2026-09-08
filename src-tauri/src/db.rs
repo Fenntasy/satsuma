@@ -213,13 +213,14 @@ impl Db {
     ///
     /// Returns [`DbError::DuplicateFolder`] when the path is already tracked.
     pub fn add_folder(&self, path: &str) -> Result<Folder> {
+        let path = &normalize_folder(path);
         match self
             .conn
             .execute("INSERT INTO folders (path) VALUES (?1)", [path])
         {
             Ok(_) => Ok(Folder {
                 id: self.conn.last_insert_rowid(),
-                path: path.to_owned(),
+                path: path.clone(),
             }),
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -359,13 +360,30 @@ impl Db {
     }
 }
 
+/// The form a folder path is stored in, so the same directory reached by two
+/// spellings (a trailing separator, a symlink) is not added twice.
+fn normalize_folder(path: &str) -> String {
+    std::fs::canonicalize(path).map_or_else(
+        |_| path.trim_end_matches(['/', '\\']).to_owned(),
+        |real| real.to_string_lossy().into_owned(),
+    )
+}
+
 /// Moves an unusable cache out of the way, keeping it for inspection under a
 /// name that does not overwrite an older one.
 fn set_aside(path: &Path) -> Result<()> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
-    let backup = with_suffix(path, &format!(".unusable-{stamp}"));
+    // A crash loop can reach this twice within the same second, and renaming
+    // over the previous copy would destroy what it is kept for.
+    let mut backup = with_suffix(path, &format!(".unusable-{stamp}"));
+    for attempt in 1..1000 {
+        if !backup.exists() {
+            break;
+        }
+        backup = with_suffix(path, &format!(".unusable-{stamp}-{attempt}"));
+    }
     for suffix in ["", "-wal", "-shm"] {
         let from = with_suffix(path, suffix);
         if from.exists() {
@@ -424,6 +442,19 @@ mod tests {
             stamp: stamp(path),
             tags,
         }
+    }
+
+    #[test]
+    fn the_same_folder_cannot_be_added_twice_under_two_spellings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_in_memory().expect("db");
+        let path = dir.path().to_string_lossy().into_owned();
+        db.add_folder(&path).expect("add");
+        assert!(matches!(
+            db.add_folder(&format!("{path}/")),
+            Err(DbError::DuplicateFolder(_))
+        ));
+        assert_eq!(db.list_folders().expect("list").len(), 1);
     }
 
     #[test]

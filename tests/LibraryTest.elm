@@ -23,19 +23,23 @@ suite =
         , describe "scan summary"
             [ test "lists only the non-zero counts" <|
                 \_ ->
-                    finishedText { added = 2, updated = 0, removed = 1, failed = 0, unreachable = 0 }
+                    finishedText { added = 2, updated = 0, removed = 1, failed = 0, unreachable = 0, emptied = 0 }
                         |> Expect.equal "Scan finished: 2 added, 1 removed"
             , test "mentions unreachable folders" <|
                 \_ ->
-                    finishedText { added = 0, updated = 0, removed = 0, failed = 1, unreachable = 2 }
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 1, unreachable = 2, emptied = 0 }
                         |> Expect.equal "Scan finished: 1 unreadable, 2 folders unreachable"
             , test "uses the singular for a single unreachable folder" <|
                 \_ ->
-                    finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 1 }
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 1, emptied = 0 }
                         |> Expect.equal "Scan finished: 1 folder unreachable"
+            , test "explains that an empty folder kept its tracks" <|
+                \_ ->
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 0, emptied = 1 }
+                        |> Expect.equal "Scan finished: 1 folder looks empty, tracks kept"
             , test "says nothing changed when every count is zero" <|
                 \_ ->
-                    finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 0 }
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 0, emptied = 0 }
                         |> Expect.equal "Scan finished: nothing changed"
             ]
         , describe "handleInvokeResult"
@@ -75,10 +79,10 @@ suite =
                         |> Expect.equal (Ok (Just (Scanning { scanned = 3, total = 10, path = "/music/a.mp3" })))
             , test "finished report" <|
                 \_ ->
-                    json "{\"status\":\"finished\",\"added\":1,\"updated\":2,\"removed\":3,\"failed\":0,\"unreachable\":1}"
+                    json "{\"status\":\"finished\",\"added\":1,\"updated\":2,\"removed\":3,\"failed\":0,\"unreachable\":1,\"emptied\":0}"
                         |> Result.map (\value -> Library.handleEvent "library://scan-finished" value model)
                         |> Result.map (Maybe.map (Tuple.first >> .scan))
-                        |> Expect.equal (Ok (Just (Finished { added = 1, updated = 2, removed = 3, failed = 0, unreachable = 1 })))
+                        |> Expect.equal (Ok (Just (Finished { added = 1, updated = 2, removed = 3, failed = 0, unreachable = 1, emptied = 0 })))
             , test "failed scan" <|
                 \_ ->
                     json "{\"status\":\"failed\",\"message\":\"disk on fire\"}"
