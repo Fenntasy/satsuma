@@ -49,6 +49,8 @@ pub enum DbError {
     DuplicateFolder(String),
     #[error("the library was created by a newer version of Satsuma (schema {0})")]
     SchemaTooNew(i64),
+    #[error("the unusable library cache could not be moved aside: {0}")]
+    CannotSetAside(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -113,13 +115,7 @@ impl Db {
             Ok(db) => Ok(db),
             Err(err) if is_unusable(&err) => {
                 log::warn!("the library cache is unusable ({err}); starting a new one");
-                let backup = with_suffix(path, ".unusable");
-                for suffix in ["", "-wal", "-shm"] {
-                    let from = with_suffix(path, suffix);
-                    if from.exists() {
-                        let _ = std::fs::rename(&from, with_suffix(&backup, suffix));
-                    }
-                }
+                set_aside(path)?;
                 Self::open(path)
             }
             Err(err) => Err(err),
@@ -363,6 +359,24 @@ impl Db {
     }
 }
 
+/// Moves an unusable cache out of the way, keeping it for inspection under a
+/// name that does not overwrite an older one.
+fn set_aside(path: &Path) -> Result<()> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let backup = with_suffix(path, &format!(".unusable-{stamp}"));
+    for suffix in ["", "-wal", "-shm"] {
+        let from = with_suffix(path, suffix);
+        if from.exists() {
+            std::fs::rename(&from, with_suffix(&backup, suffix)).inspect_err(|err| {
+                log::error!("cannot move {} aside: {err}", from.display());
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether the file behind this error can never be opened, however many
 /// times we try.
 fn is_unusable(err: &DbError) -> bool {
@@ -521,10 +535,24 @@ mod tests {
         let db = Db::open_or_recreate(&path).expect("recreate");
         assert!(db.list_folders().expect("list").is_empty());
         assert_eq!(
-            std::fs::read(path.with_file_name("library.sqlite.unusable")).expect("backup"),
+            std::fs::read(set_aside_file(dir.path())).expect("backup"),
             b"this is not a database",
             "the unusable file must be kept for inspection"
         );
+    }
+
+    /// The single `library.sqlite.unusable-<stamp>` file in `dir`.
+    fn set_aside_file(dir: &std::path::Path) -> std::path::PathBuf {
+        let mut found: Vec<_> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|entry| {
+                let path = entry.expect("entry").path();
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                name.starts_with("library.sqlite.unusable-").then_some(path)
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "exactly one cache must have been set aside");
+        found.pop().expect("one file")
     }
 
     #[test]
@@ -536,7 +564,7 @@ mod tests {
             conn.pragma_update(None, "user_version", 99).expect("stamp");
         }
         Db::open_or_recreate(&path).expect("recreate");
-        assert!(path.with_file_name("library.sqlite.unusable").exists());
+        assert!(set_aside_file(dir.path()).exists());
     }
 
     #[test]
@@ -549,7 +577,16 @@ mod tests {
             .expect("add");
         let db = Db::open_or_recreate(&path).expect("reopen");
         assert_eq!(db.list_folders().expect("list").len(), 1);
-        assert!(!path.with_file_name("library.sqlite.unusable").exists());
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("read dir")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("unusable")),
+            "a healthy cache must not be moved aside"
+        );
     }
 
     #[test]

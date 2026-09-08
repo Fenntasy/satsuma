@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -99,7 +99,9 @@ pub fn scan(
 
     let gone: Vec<String> = known
         .into_iter()
-        .filter(|(_, (folder_id, _))| found.prunable.contains(folder_id))
+        .filter(|(path, (folder_id, _))| {
+            found.prunable.contains(folder_id) && !found.protected.contains(path)
+        })
         .map(|(path, _)| path)
         .collect();
     if !gone.is_empty() {
@@ -117,6 +119,8 @@ struct Found<'a> {
     /// Folders that exist but hold no audio file. Whether they are safe to
     /// prune depends on what the cache holds for them.
     empty: HashSet<i64>,
+    /// Paths that exist but could not be read, which must survive pruning.
+    protected: HashSet<String>,
     scanned: Vec<&'a Folder>,
 }
 
@@ -125,6 +129,7 @@ fn collect_files<'a>(folders: &'a [Folder], report: &mut ScanReport) -> Found<'a
         files: Vec::new(),
         prunable: HashSet::new(),
         empty: HashSet::new(),
+        protected: HashSet::new(),
         scanned: Vec::new(),
     };
     let mut seen: HashSet<String> = HashSet::new();
@@ -152,6 +157,7 @@ fn collect_files<'a>(folders: &'a [Folder], report: &mut ScanReport) -> Found<'a
         } else {
             found.prunable.insert(folder.id);
         }
+        found.protected.extend(walk.unreadable_files);
         for file in walk.files {
             // A file can be reached through two folders when one is nested
             // inside the other, or through a symlink. Keep the first.
@@ -212,53 +218,107 @@ struct FoundFile {
 /// The audio files found under a folder.
 struct FolderWalk {
     files: Vec<FoundFile>,
-    /// Directories that could not be listed. A file that vanished between
-    /// being listed and being stat'ed is not counted: that only means it is
-    /// gone, which pruning handles.
+    /// Directories that could not be listed, which makes the whole folder
+    /// unsafe to prune.
     unreadable_dirs: u64,
+    /// Files that exist but could not be read right now. Their cached rows
+    /// are kept: unlike a deleted file, this may be a passing failure.
+    unreadable_files: Vec<String>,
+}
+
+/// What looking at one file yielded.
+enum Stamped {
+    Found(Box<FoundFile>),
+    /// The file is gone, so its cached row may be pruned.
+    Gone,
+    /// The file is there but could not be read.
+    Unreadable,
 }
 
 fn audio_files(root: &Path) -> FolderWalk {
     let mut walk = FolderWalk {
         files: Vec::new(),
         unreadable_dirs: 0,
+        unreadable_files: Vec::new(),
     };
-    for entry in WalkDir::new(root).follow_links(true) {
+    // Sorted so that, when the same file is reachable through two paths, the
+    // same one wins on every scan.
+    for entry in WalkDir::new(root).follow_links(true).sort_by_file_name() {
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => {
-                log::warn!("cannot read directory entry: {err}");
-                walk.unreadable_dirs += 1;
+                if is_harmless_walk_error(&err) {
+                    // A dangling symlink or a symlink loop says nothing
+                    // about whether the folder was read completely.
+                    log::debug!("skipping entry: {err}");
+                } else {
+                    log::warn!("cannot read directory entry: {err}");
+                    walk.unreadable_dirs += 1;
+                }
                 continue;
             }
         };
         if !entry.file_type().is_file() || !is_audio_file(entry.path()) {
             continue;
         }
-        if let Some(stamp) = stamp_of(&entry) {
-            walk.files.push(stamp);
-        } else {
-            // The file went away between being listed and being read.
-            log::warn!("cannot stat {}", entry.path().display());
+        match stamp_of(&entry) {
+            Stamped::Found(file) => walk.files.push(*file),
+            Stamped::Gone => log::debug!("{} went away during the scan", entry.path().display()),
+            Stamped::Unreadable => {
+                log::warn!("cannot stat {}", entry.path().display());
+                walk.unreadable_files
+                    .push(entry.path().to_string_lossy().into_owned());
+            }
         }
     }
     walk
 }
 
-fn stamp_of(entry: &walkdir::DirEntry) -> Option<FoundFile> {
-    let metadata = entry.metadata().ok()?;
-    let mtime = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+/// Whether a walk error means an entry is unusable rather than a directory
+/// being unreadable: a dangling symlink, a symlink loop, or an entry that
+/// disappeared while the walk was running.
+fn is_harmless_walk_error(err: &walkdir::Error) -> bool {
+    err.loop_ancestor().is_some()
+        || err
+            .io_error()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn stamp_of(entry: &walkdir::DirEntry) -> Stamped {
+    let metadata = match entry.metadata() {
+        Ok(metadata) => metadata,
+        Err(err) if err.io_error().is_some_and(is_not_found) => return Stamped::Gone,
+        Err(_) => return Stamped::Unreadable,
+    };
+    let Ok(modified) = metadata.modified() else {
+        return Stamped::Unreadable;
+    };
     let path = entry.path().to_string_lossy().into_owned();
     let key = std::fs::canonicalize(entry.path())
         .map_or_else(|_| path.clone(), |real| real.to_string_lossy().into_owned());
-    Some(FoundFile {
+    Stamped::Found(Box::new(FoundFile {
         stamp: FileStamp {
             path,
-            mtime: i64::try_from(mtime.as_secs()).unwrap_or(i64::MAX),
+            mtime: seconds_since_epoch(modified),
             size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
         },
         key,
-    })
+    }))
+}
+
+fn is_not_found(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::NotFound
+}
+
+/// Seconds since the Unix epoch, negative for the files dated before it that
+/// bad archive extraction and legacy imports leave behind.
+fn seconds_since_epoch(time: SystemTime) -> i64 {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
+        Err(before) => {
+            i64::try_from(before.duration().as_secs()).map_or(i64::MIN, |seconds| -seconds)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -268,7 +328,7 @@ mod tests {
 
     use lofty::prelude::Accessor;
 
-    use super::{scan, ScanProgress, ScanReport, BATCH_SIZE};
+    use super::{scan, seconds_since_epoch, ScanProgress, ScanReport, BATCH_SIZE};
     use crate::db::Db;
     use crate::tags::tests::{sample_tag, tagged_copy, FIXTURE};
 
@@ -451,6 +511,47 @@ mod tests {
             }
         );
         assert_eq!(track_count(&db), 1, "cached tracks must survive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_does_not_disable_pruning() {
+        let (dir, db) = setup();
+        fs::copy(FIXTURE, dir.path().join("kept.mp3")).expect("copy");
+        fs::copy(FIXTURE, dir.path().join("deleted.mp3")).expect("copy");
+        let (report, _) = scan_all(&db);
+        assert_eq!(report.added, 2);
+
+        // A link to a file that no longer exists, next to a deleted track.
+        std::os::unix::fs::symlink(dir.path().join("nowhere.mp3"), dir.path().join("link.mp3"))
+            .expect("symlink");
+        fs::remove_file(dir.path().join("deleted.mp3")).expect("remove");
+        let (report, _) = scan_all(&db);
+        assert_eq!(
+            report,
+            ScanReport {
+                removed: 1,
+                ..ScanReport::default()
+            },
+            "a dangling symlink must not stop the scan from pruning"
+        );
+        assert_eq!(track_count(&db), 1);
+    }
+
+    #[test]
+    fn a_date_before_the_epoch_becomes_a_negative_timestamp() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        assert_eq!(seconds_since_epoch(UNIX_EPOCH), 0);
+        assert_eq!(
+            seconds_since_epoch(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            1_700_000_000
+        );
+        assert_eq!(
+            seconds_since_epoch(UNIX_EPOCH - Duration::from_hours(24)),
+            -86_400,
+            "a file older than 1970 must still be scannable"
+        );
     }
 
     #[test]
