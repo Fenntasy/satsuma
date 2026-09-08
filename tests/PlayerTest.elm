@@ -89,6 +89,11 @@ suite =
                     Player.handleInvokeResult "play_library" (Ok Encode.null) model
                         |> Maybe.map (Tuple.first >> .error)
                         |> Expect.equal (Just Nothing)
+            , test "enqueue_library errors reach the panel" <|
+                \_ ->
+                    Player.handleInvokeResult "enqueue_library" (Err "the library is empty") model
+                        |> Maybe.map (Tuple.first >> .error)
+                        |> Expect.equal (Just (Just "the library is empty"))
             , test "another module's command is not ours" <|
                 \_ ->
                     Player.handleInvokeResult "list_folders" (Ok Encode.null) model

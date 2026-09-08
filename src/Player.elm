@@ -231,7 +231,10 @@ when the command is not one of ours.
 -}
 handleInvokeResult : String -> Result String Decode.Value -> Model -> Maybe ( Model, Cmd Msg )
 handleInvokeResult command_ outcome model =
-    if String.startsWith "player_" command_ || command_ == "play_library" then
+    if
+        String.startsWith "player_" command_
+            || List.member command_ [ "play_library", "enqueue_library" ]
+    then
         Just
             (case outcome of
                 Ok _ ->

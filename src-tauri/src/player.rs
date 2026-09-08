@@ -227,8 +227,9 @@ impl Player {
                 let was_empty = self.queue.is_empty();
                 self.queue.append(tracks);
                 if was_empty {
-                    let track = self.queue.jump_to(0);
-                    self.play_advance(track);
+                    // The order under shuffle does not start at track 0.
+                    let advance = self.queue.start_from_beginning();
+                    self.play_advance(advance);
                 }
             }
             Command::PlayNext(index) => self.queue.play_next(index),
@@ -349,9 +350,9 @@ impl Player {
             }
             Status::Stopped => {
                 let track = self.queue.current().cloned().or_else(|| {
-                    // Nothing was playing: start the queue from its first
-                    // track.
-                    match self.queue.jump_to(0) {
+                    // Nothing was playing: start the queue from the top of
+                    // its playing order.
+                    match self.queue.start_from_beginning() {
                         Advance::Play(track) => Some(*track),
                         Advance::Stop => None,
                     }

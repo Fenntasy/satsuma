@@ -83,6 +83,14 @@ impl Queue {
         }
     }
 
+    /// Starts at the beginning of the playing order, which under shuffle is
+    /// not the first track of the queue.
+    pub fn start_from_beginning(&mut self) -> Advance {
+        self.resume = None;
+        self.cursor = if self.order.is_empty() { None } else { Some(0) };
+        self.play_current()
+    }
+
     /// Plays `index` next, before the rest of the queue continues.
     pub fn play_next(&mut self, index: usize) {
         if index < self.tracks.len() {
@@ -518,6 +526,24 @@ mod tests {
         assert_eq!(queue.current().map(|t| t.id), Some(1));
         assert_eq!(playing(&queue.skip_forward()), Some(2));
         assert!(matches!(queue.skip_forward(), Advance::Play(_)));
+    }
+
+    #[test]
+    fn filling_an_empty_shuffled_queue_plays_every_track() {
+        let mut queue = Queue::new();
+        queue.set_shuffle(true);
+        queue.append(tracks(8));
+
+        let mut played = match queue.start_from_beginning() {
+            Advance::Play(track) => vec![track.id],
+            Advance::Stop => panic!("the queue must start playing"),
+        };
+        while let Advance::Play(track) = queue.skip_forward() {
+            played.push(track.id);
+        }
+        played.sort_unstable();
+        played.dedup();
+        assert_eq!(played.len(), 8, "shuffle must not skip the first tracks");
     }
 
     #[test]
