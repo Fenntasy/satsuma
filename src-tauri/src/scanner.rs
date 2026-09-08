@@ -83,8 +83,8 @@ pub fn scan(
         for file in walk.files {
             // A file can be reached through two folders when one is nested
             // inside the other, or through a symlink. Keep the first.
-            if seen.insert(file.path.clone()) {
-                files.push((folder.id, file));
+            if seen.insert(file.key) {
+                files.push((folder.id, file.stamp));
             }
         }
     }
@@ -155,10 +155,19 @@ fn with_db<T>(db: &Mutex<Db>, f: impl FnOnce(&Db) -> Result<T, DbError>) -> Resu
     f(&db)
 }
 
+/// A file found by the walk, with the key used to recognise it when it is
+/// reachable through more than one library folder.
+struct FoundFile {
+    stamp: FileStamp,
+    /// The canonical path, so the same file behind a symlink is not counted
+    /// twice.
+    key: String,
+}
+
 /// The audio files found under a folder, and how many paths could not be
 /// read while walking it.
 struct FolderWalk {
-    files: Vec<FileStamp>,
+    files: Vec<FoundFile>,
     errors: u64,
 }
 
@@ -189,13 +198,19 @@ fn audio_files(root: &Path) -> FolderWalk {
     walk
 }
 
-fn stamp_of(entry: &walkdir::DirEntry) -> Option<FileStamp> {
+fn stamp_of(entry: &walkdir::DirEntry) -> Option<FoundFile> {
     let metadata = entry.metadata().ok()?;
     let mtime = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
-    Some(FileStamp {
-        path: entry.path().to_string_lossy().into_owned(),
-        mtime: i64::try_from(mtime.as_secs()).unwrap_or(i64::MAX),
-        size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+    let path = entry.path().to_string_lossy().into_owned();
+    let key = std::fs::canonicalize(entry.path())
+        .map_or_else(|_| path.clone(), |real| real.to_string_lossy().into_owned());
+    Some(FoundFile {
+        stamp: FileStamp {
+            path,
+            mtime: i64::try_from(mtime.as_secs()).unwrap_or(i64::MAX),
+            size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+        },
+        key,
     })
 }
 
@@ -343,6 +358,22 @@ mod tests {
         assert_eq!(track_count(&db), 1);
 
         // A second scan must see the file as unchanged, not as new again.
+        let (report, _) = scan_all(&db);
+        assert_eq!(report, ScanReport::default());
+    }
+
+    #[test]
+    fn a_file_reached_through_a_symlinked_folder_is_scanned_once() {
+        let (dir, db) = setup();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).expect("mkdir");
+        fs::copy(FIXTURE, real.join("song.mp3")).expect("copy");
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("symlink");
+
+        let (report, _) = scan_all(&db);
+        assert_eq!(report.added, 1, "the same file must not be added twice");
+        assert_eq!(track_count(&db), 1);
+
         let (report, _) = scan_all(&db);
         assert_eq!(report, ScanReport::default());
     }

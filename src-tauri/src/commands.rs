@@ -1,6 +1,6 @@
 //! Tauri commands exposed to the frontend.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -19,6 +19,46 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 struct ScanStatus {
     running: bool,
     rescan_requested: bool,
+}
+
+impl ScanStatus {
+    /// Claims the scan slot. Returns `true` when the caller has to run the
+    /// scan, `false` when one is already running and another pass has been
+    /// queued instead.
+    fn claim(&mut self) -> bool {
+        if self.running {
+            self.rescan_requested = true;
+            false
+        } else {
+            self.running = true;
+            true
+        }
+    }
+
+    /// Ends a pass. Returns `true` when another pass was requested while it
+    /// was running, in which case the slot stays claimed.
+    fn finish_pass(&mut self) -> bool {
+        if self.rescan_requested {
+            self.rescan_requested = false;
+            true
+        } else {
+            self.running = false;
+            false
+        }
+    }
+
+    /// Releases the slot after a scan that ended unexpectedly.
+    fn abort(&mut self) {
+        self.running = false;
+        self.rescan_requested = false;
+    }
+}
+
+/// Locks the scan status, recovering from a poisoned lock: the status is two
+/// booleans with no invariant a panic could break, and refusing to touch it
+/// would leave scanning disabled for the rest of the session.
+fn lock_status(status: &Mutex<ScanStatus>) -> MutexGuard<'_, ScanStatus> {
+    status.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Shared application state managed by Tauri.
@@ -113,35 +153,31 @@ pub async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
 ///
 /// When a scan is already running, another pass is queued instead: folders
 /// added meanwhile are picked up as soon as the current pass ends.
-///
-/// # Errors
-///
-/// Returns a message when the scan state cannot be read.
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
-pub fn start_scan(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub fn start_scan(app: AppHandle, state: State<'_, AppState>) {
     let scan = Arc::clone(&state.scan);
-    {
-        let mut status = scan.lock().map_err(|_| "scan state lock poisoned")?;
-        if status.running {
-            status.rescan_requested = true;
-            return Ok(());
-        }
-        status.running = true;
+    if !lock_status(&scan).claim() {
+        return;
     }
-    tauri::async_runtime::spawn_blocking(move || run_scan(&app, ScanGuard::new(scan)));
-    Ok(())
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = ScanGuard::new(app.clone(), scan);
+        run_scan(&app, guard);
+    });
 }
 
-/// Marks the scan as finished if the scan thread panics.
+/// Releases the scan slot and tells the frontend if the scan thread dies
+/// without reporting a result of its own.
 struct ScanGuard {
+    app: AppHandle,
     scan: Arc<Mutex<ScanStatus>>,
     handed_over: bool,
 }
 
 impl ScanGuard {
-    fn new(scan: Arc<Mutex<ScanStatus>>) -> Self {
+    fn new(app: AppHandle, scan: Arc<Mutex<ScanStatus>>) -> Self {
         ScanGuard {
+            app,
             scan,
             handed_over: false,
         }
@@ -151,9 +187,14 @@ impl ScanGuard {
 impl Drop for ScanGuard {
     fn drop(&mut self) {
         if !self.handed_over {
-            if let Ok(mut status) = self.scan.lock() {
-                status.running = false;
-            }
+            lock_status(&self.scan).abort();
+            emit(
+                &self.app,
+                SCAN_FINISHED_EVENT,
+                &ScanOutcome::Failed {
+                    message: "the scan stopped unexpectedly".to_owned(),
+                },
+            );
         }
     }
 }
@@ -165,16 +206,10 @@ fn run_scan(app: &AppHandle, mut guard: ScanGuard) {
         // Decide whether to run again while still holding the lock, so a
         // request that arrives now is either seen here or starts its own
         // scan afterwards, never dropped in between.
-        let Ok(mut status) = guard.scan.lock() else {
+        if !lock_status(&guard.scan).finish_pass() {
+            guard.handed_over = true;
             return;
-        };
-        if status.rescan_requested {
-            status.rescan_requested = false;
-            continue;
         }
-        status.running = false;
-        guard.handed_over = true;
-        return;
     }
 }
 
@@ -209,8 +244,40 @@ fn emit<T: serde::Serialize + Clone>(app: &AppHandle, event: &str, payload: &T) 
 
 #[cfg(test)]
 mod tests {
-    use super::{ping_reply, ScanOutcome};
+    use super::{ping_reply, ScanOutcome, ScanStatus};
     use crate::scanner::ScanReport;
+
+    #[test]
+    fn the_first_caller_runs_the_scan() {
+        let mut status = ScanStatus::default();
+        assert!(status.claim());
+        assert!(!status.finish_pass());
+        assert!(!status.running);
+    }
+
+    #[test]
+    fn a_scan_asked_for_during_a_scan_runs_one_more_pass() {
+        let mut status = ScanStatus::default();
+        assert!(status.claim());
+        // Two requests while the scan runs collapse into a single extra pass.
+        assert!(!status.claim());
+        assert!(!status.claim());
+        assert!(status.finish_pass(), "the queued pass must run");
+        assert!(status.running, "the slot stays claimed between passes");
+        assert!(!status.finish_pass());
+        assert!(!status.running);
+    }
+
+    #[test]
+    fn aborting_releases_the_slot_and_forgets_queued_passes() {
+        let mut status = ScanStatus::default();
+        assert!(status.claim());
+        assert!(!status.claim());
+        status.abort();
+        assert!(!status.running);
+        assert!(status.claim(), "a later scan can claim the slot again");
+        assert!(!status.finish_pass(), "the queued pass was forgotten");
+    }
 
     #[test]
     fn ping_reply_contains_name_and_version() {

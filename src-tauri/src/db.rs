@@ -98,6 +98,36 @@ impl Db {
         Self::from_connection(conn)
     }
 
+    /// Opens the library cache at `path`, moving the existing file aside and
+    /// starting a new one when it cannot be used at all: the cache is
+    /// rebuildable, so a corrupted file or one written by a newer version of
+    /// Satsuma must not prevent the app from starting. Failures that may be
+    /// temporary (a locked file, an I/O error) are returned as-is so a
+    /// healthy cache is never thrown away.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be opened and the failure
+    /// does not mean the file is unusable, or when the replacement cannot be
+    /// created either.
+    pub fn open_or_recreate(path: &Path) -> Result<Self> {
+        match Self::open(path) {
+            Ok(db) => Ok(db),
+            Err(err) if is_unusable(&err) => {
+                log::warn!("the library cache is unusable ({err}); starting a new one");
+                let backup = with_suffix(path, ".unusable");
+                for suffix in ["", "-wal", "-shm"] {
+                    let from = with_suffix(path, suffix);
+                    if from.exists() {
+                        let _ = std::fs::rename(&from, with_suffix(&backup, suffix));
+                    }
+                }
+                Self::open(path)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// Opens an in-memory database, used by tests.
     ///
     /// # Errors
@@ -335,6 +365,25 @@ impl Db {
     }
 }
 
+/// Whether the file behind this error can never be opened, however many
+/// times we try.
+fn is_unusable(err: &DbError) -> bool {
+    match err {
+        DbError::SchemaTooNew(_) => true,
+        DbError::Sqlite(rusqlite::Error::SqliteFailure(failure, _)) => matches!(
+            failure.code,
+            rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+        ),
+        _ => false,
+    }
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    name.into()
+}
+
 /// The lowercase serde name of a unit enum variant, as stored in the DB.
 fn serde_variant<T: Serialize>(value: &T) -> String {
     serde_json::to_value(value)
@@ -471,6 +520,46 @@ mod tests {
             conn.pragma_update(None, "user_version", 99).expect("stamp");
         }
         assert!(matches!(Db::open(&path), Err(DbError::SchemaTooNew(99))));
+    }
+
+    #[test]
+    fn an_unusable_cache_is_moved_aside_and_recreated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("library.sqlite");
+        std::fs::write(&path, b"this is not a database").expect("write garbage");
+
+        let db = Db::open_or_recreate(&path).expect("recreate");
+        assert!(db.list_folders().expect("list").is_empty());
+        assert_eq!(
+            std::fs::read(path.with_file_name("library.sqlite.unusable")).expect("backup"),
+            b"this is not a database",
+            "the unusable file must be kept for inspection"
+        );
+    }
+
+    #[test]
+    fn a_cache_from_a_newer_version_is_moved_aside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("library.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open");
+            conn.pragma_update(None, "user_version", 99).expect("stamp");
+        }
+        Db::open_or_recreate(&path).expect("recreate");
+        assert!(path.with_file_name("library.sqlite.unusable").exists());
+    }
+
+    #[test]
+    fn a_healthy_cache_is_never_moved_aside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("library.sqlite");
+        Db::open_or_recreate(&path)
+            .expect("create")
+            .add_folder("/music")
+            .expect("add");
+        let db = Db::open_or_recreate(&path).expect("reopen");
+        assert_eq!(db.list_folders().expect("list").len(), 1);
+        assert!(!path.with_file_name("library.sqlite.unusable").exists());
     }
 
     #[test]

@@ -155,7 +155,9 @@ handleInvokeResult command outcome model =
             Just (decodeInto folderDecoder outcome model (\_ m -> ( m, Cmd.batch [ refresh, startScan ] )))
 
         "remove_folder" ->
-            Just (decodeInto (Decode.succeed ()) outcome model (\_ m -> ( m, refresh )))
+            -- Rescan too: tracks shared with a folder that is still in the
+            -- library go away with the removed one and must come back.
+            Just (decodeInto (Decode.succeed ()) outcome model (\_ m -> ( m, Cmd.batch [ refresh, startScan ] )))
 
         "start_scan" ->
             Just (decodeInto (Decode.succeed ()) outcome model (\_ m -> ( m, Cmd.none )))

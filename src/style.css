@@ -15,6 +15,7 @@
   --border: #e4ddd2;
   --accent: #e8731a;
   --accent-fg: #ffffff;
+  --danger: #b3311c;
 }
 
 .app[data-theme="dark"] {
@@ -27,6 +28,7 @@
   --border: #332d26;
   --accent: #f28c3a;
   --accent-fg: #1a120a;
+  --danger: #ff9c85;
 }
 
 html,
@@ -207,7 +209,7 @@ body {
 
 .error {
   margin: 8px 0 0;
-  color: #c9412b;
+  color: var(--danger);
 }
 
 .scan {
