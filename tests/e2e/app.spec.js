@@ -30,35 +30,25 @@ function playerState(overrides = {}) {
  * Loads the app against the stubbed host, with a library already scanned.
  */
 async function open(page, { folders = FOLDERS, stats = STATS } = {}) {
-  await page.addInitScript(installTauriStub);
+  // Seeded before the page loads, so the commands Elm sends on startup get
+  // real answers rather than null.
+  await page.addInitScript(installTauriStub, {
+    ping: "satsuma test",
+    list_folders: folders,
+    library_stats: stats,
+  });
   await page.goto("/");
-  await page.evaluate(
-    ([folders, stats]) => {
-      window.__SATSUMA_TEST__.reply("list_folders", folders);
-      window.__SATSUMA_TEST__.reply("library_stats", stats);
-      window.__SATSUMA_TEST__.reply("ping", "satsuma test");
-    },
-    [folders, stats],
-  );
-  // The first commands were answered before the replies were set, so ask
-  // again now that the library is there.
-  await page.evaluate(() =>
-    window.__SATSUMA_TEST__.emit("library://scan-finished", {
-      status: "finished",
-      added: 3,
-      updated: 0,
-      removed: 0,
-      failed: 0,
-      unreachable: 0,
-      emptied: 0,
-    }),
-  );
   await expect(page.getByText("3 tracks")).toBeVisible();
 }
 
-/** The commands the app has sent since this was last called. */
-function takeCalls(page) {
-  return page.evaluate(() => window.__SATSUMA_TEST__.takeCalls());
+/** The commands the app has sent so far. */
+function calls(page) {
+  return page.evaluate(() => window.__SATSUMA_TEST__.calls());
+}
+
+/** Forgets the commands sent so far, so the next assertion starts clean. */
+function clearCalls(page) {
+  return page.evaluate(() => window.__SATSUMA_TEST__.clearCalls());
 }
 
 function emit(page, event, payload) {
@@ -86,12 +76,15 @@ test("asks for the library and the player state on startup", async ({ page }) =>
   await page.addInitScript(installTauriStub);
   await page.goto("/");
   await expect
-    .poll(async () => (await takeCalls(page)).map((call) => call.command).sort())
+    .poll(async () => (await calls(page)).map((call) => call.command).sort())
     .toEqual(["library_stats", "list_folders", "ping", "player_state", "start_scan"]);
 });
 
-test("shows the library and its folders", async ({ page }) => {
+test("shows the library, its folders and that the backend answered", async ({
+  page,
+}) => {
   await open(page);
+  await expect(page.getByText("Backend: satsuma test")).toBeVisible();
   await expect(page.getByText("3 tracks · 12:34")).toBeVisible();
   await expect(page.getByTitle("/music")).toBeVisible();
   await expect(page.getByTitle("/more music")).toBeVisible();
@@ -99,19 +92,19 @@ test("shows the library and its folders", async ({ page }) => {
 
 test("Play all asks the backend to play the library", async ({ page }) => {
   await open(page);
-  await takeCalls(page);
+  await clearCalls(page);
   await page.getByRole("button", { name: "Play all" }).click();
   await expect
-    .poll(async () => (await takeCalls(page)).map((call) => call.command))
+    .poll(async () => (await calls(page)).map((call) => call.command))
     .toEqual(["play_library"]);
 });
 
 test("Queue all asks the backend to append the library", async ({ page }) => {
   await open(page);
-  await takeCalls(page);
+  await clearCalls(page);
   await page.getByRole("button", { name: "Queue all" }).click();
   await expect
-    .poll(async () => (await takeCalls(page)).map((call) => call.command))
+    .poll(async () => (await calls(page)).map((call) => call.command))
     .toEqual(["enqueue_library"]);
 });
 
@@ -142,7 +135,7 @@ test("shows what is playing and how far in", async ({ page }) => {
 test("the transport buttons send their commands", async ({ page }) => {
   await open(page);
   await emit(page, "player://state", playerState({ status: "playing" }));
-  await takeCalls(page);
+  await clearCalls(page);
 
   await page.getByTitle("Previous").click();
   await page.getByTitle("Pause").click();
@@ -150,7 +143,7 @@ test("the transport buttons send their commands", async ({ page }) => {
   await page.getByTitle("Stop", { exact: true }).click();
 
   await expect
-    .poll(async () => (await takeCalls(page)).map((call) => call.command))
+    .poll(async () => (await calls(page)).map((call) => call.command))
     .toEqual([
       "player_previous",
       "player_play_pause",
@@ -172,12 +165,12 @@ test("shuffle and stop after this track send the opposite of the state", async (
 }) => {
   await open(page);
   await emit(page, "player://state", playerState({ shuffle: true }));
-  await takeCalls(page);
+  await clearCalls(page);
 
   await page.getByTitle("Shuffle").click();
   await page.getByTitle("Stop after this track").click();
 
-  await expect.poll(() => takeCalls(page)).toEqual([
+  await expect.poll(() => calls(page)).toEqual([
     { command: "player_set_shuffle", args: { shuffle: false } },
     { command: "player_set_stop_after_current", args: { stop: true } },
   ]);
@@ -189,10 +182,10 @@ test("repeat cycles off, playlist, track", async ({ page }) => {
   const sent = [];
   for (const mode of modes) {
     await emit(page, "player://state", playerState({ repeat: mode }));
-    await takeCalls(page);
+    await clearCalls(page);
     await page.getByTitle(/^Repeat/).click();
-    const calls = await takeCalls(page);
-    sent.push(calls[0].args.repeat);
+    await expect.poll(async () => (await calls(page)).length).toBe(1);
+    sent.push((await calls(page))[0].args.repeat);
   }
   expect(sent).toEqual(["queue", "track", "off"]);
 });
@@ -208,11 +201,11 @@ test("dragging the seek bar asks the backend to seek", async ({ page }) => {
       position_ms: 1000,
     }),
   );
-  await takeCalls(page);
+  await clearCalls(page);
 
   await page.locator("input.seek").fill("42000");
 
-  await expect.poll(() => takeCalls(page)).toEqual([
+  await expect.poll(() => calls(page)).toEqual([
     { command: "player_seek", args: { positionMs: 42000 } },
   ]);
 });
@@ -245,9 +238,9 @@ test("the seek bar shows where the user dropped it until the backend seeks", asy
 
 test("the volume slider sends a fraction", async ({ page }) => {
   await open(page);
-  await takeCalls(page);
+  await clearCalls(page);
   await page.locator("input.volume").fill("40");
-  await expect.poll(() => takeCalls(page)).toEqual([
+  await expect.poll(() => calls(page)).toEqual([
     { command: "player_set_volume", args: { volume: 0.4 } },
   ]);
 });
@@ -288,18 +281,18 @@ test("Add folder asks for a folder and adds the one that was picked", async ({
   await page.evaluate(() =>
     window.__SATSUMA_TEST__.reply("pick_folder", "/picked"),
   );
-  await takeCalls(page);
+  await clearCalls(page);
   await page.getByRole("button", { name: "Add folder" }).click();
   await expect
-    .poll(async () => (await takeCalls(page)).map((call) => call.command))
+    .poll(async () => (await calls(page)).map((call) => call.command))
     .toContain("add_folder");
 });
 
 test("removing a folder sends its id", async ({ page }) => {
   await open(page);
-  await takeCalls(page);
+  await clearCalls(page);
   await page.getByTitle("Remove folder").first().click();
-  await expect.poll(() => takeCalls(page)).toContainEqual({
+  await expect.poll(() => calls(page)).toContainEqual({
     command: "remove_folder",
     args: { id: 1 },
   });

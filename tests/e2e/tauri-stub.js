@@ -7,14 +7,14 @@
  * over a callback id. Implementing those three functions is enough to drive
  * the real frontend without a Rust backend.
  */
-export function installTauriStub() {
+export function installTauriStub(seed = {}) {
   const calls = [];
   const callbacks = new Map();
   const listeners = new Map();
   let nextCallbackId = 1;
 
-  /** Replies for commands, filled by the tests. */
-  const replies = new Map();
+  /** Replies for commands, seeded before the page loads. */
+  const replies = new Map(Object.entries(seed));
 
   window.__TAURI_INTERNALS__ = {
     transformCallback(callback, once = false) {
@@ -56,12 +56,15 @@ export function installTauriStub() {
   };
 
   window.__SATSUMA_TEST__ = {
-    /** Every command the app has sent, in order. */
-    calls,
+    /** Every command the app has sent, in order. Reading does not clear
+     * them: a poll that consumed a partial batch could never succeed. */
+    calls() {
+      return calls.slice();
+    },
 
-    /** Commands sent since the last call, clearing the record. */
-    takeCalls() {
-      return calls.splice(0, calls.length);
+    /** Forgets the commands sent so far. */
+    clearCalls() {
+      calls.length = 0;
     },
 
     /** Makes `command` answer with `value`, or fail when given an Error. */
