@@ -42,6 +42,7 @@ suite =
                                     , repeat = RepeatQueue
                                     , stopAfterCurrent = False
                                     , queueLength = 13
+                                    , error = Nothing
                                     }
                                 )
                             )
@@ -65,6 +66,12 @@ suite =
                     state (stateJson "spinning" "off")
                         |> Result.map (Maybe.map .status)
                         |> Expect.equal (Ok Nothing)
+            , test "a playback failure reaches the panel" <|
+                \_ ->
+                    Decode.decodeString Decode.value (errorJson "cannot play /music/gone.mp3")
+                        |> Result.map (\payload -> Player.handleEvent "player://state" payload model)
+                        |> Result.map (Maybe.map (Tuple.first >> .error))
+                        |> Expect.equal (Ok (Just (Just "cannot play /music/gone.mp3")))
             , test "another module's event is not ours" <|
                 \_ ->
                     Player.handleEvent "library://scan-finished" Encode.null model
@@ -141,6 +148,23 @@ playingJson =
 stoppedJson : String
 stoppedJson =
     stateJson "stopped" "off"
+
+
+errorJson : String -> String
+errorJson message =
+    """
+    { "status": "stopped"
+    , "track": null
+    , "position_ms": 0
+    , "volume": 1.0
+    , "shuffle": false
+    , "repeat": "off"
+    , "stop_after_current": false
+    , "queue_length": 0
+    , "queue_index": null
+    , "error": \"""" ++ message ++ """"
+    }
+    """
 
 
 stateJson : String -> String -> String

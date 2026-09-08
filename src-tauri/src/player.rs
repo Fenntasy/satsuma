@@ -97,11 +97,12 @@ pub fn run(
         Ok(player) => player,
         Err(err) => {
             log::error!("no audio output ({err}); playback is disabled");
-            on_state(State {
+            let state = State {
                 error: Some(err),
                 ..State::default()
-            });
-            drain(commands, alive);
+            };
+            on_state(state.clone());
+            drain(commands, alive, &state, on_state);
             return;
         }
     };
@@ -126,13 +127,19 @@ pub fn run(
     }
 }
 
-/// Waits for the shutdown command without playing anything, so commands
-/// issued when there is no audio device do not pile up.
-fn drain(commands: &Receiver<Command>, alive: &Weak<()>) {
+/// Answers commands without playing anything, which is what happens when
+/// there is no audio device. Every command still gets the failure back, so
+/// a frontend that starts after the first report still learns about it.
+fn drain(
+    commands: &Receiver<Command>,
+    alive: &Weak<()>,
+    state: &State,
+    mut on_state: impl FnMut(State),
+) {
     loop {
         match commands.recv_timeout(TICK) {
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
-            Ok(_) => {}
+            Ok(_) => on_state(state.clone()),
             Err(RecvTimeoutError::Timeout) => {
                 if alive.upgrade().is_none() {
                     return;
@@ -180,7 +187,10 @@ impl Player {
     }
 
     fn handle(&mut self, command: Command) {
-        self.error = None;
+        // Asking where we are must not erase why the last attempt failed.
+        if !matches!(command, Command::ReportState) {
+            self.error = None;
+        }
         match command {
             Command::Play { tracks, start } => {
                 let track = self.queue.replace(tracks, start).cloned();

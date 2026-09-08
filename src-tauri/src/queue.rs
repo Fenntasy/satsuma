@@ -116,11 +116,6 @@ impl Queue {
     }
 
     #[must_use]
-    pub fn tracks(&self) -> &[Track] {
-        &self.tracks
-    }
-
-    #[must_use]
     pub fn shuffle(&self) -> bool {
         self.shuffle
     }
@@ -150,6 +145,9 @@ impl Queue {
             return;
         }
         self.shuffle = shuffle;
+        // The positions in `order` all change, so a remembered one would
+        // point at an unrelated track.
+        self.resume = None;
         let current = self.current_index();
         self.rebuild_order(current);
     }
@@ -179,6 +177,7 @@ impl Queue {
     /// the first track, which is what a player does when you press previous
     /// twice at the beginning.
     pub fn previous(&mut self) -> Advance {
+        self.resume = None;
         let Some(cursor) = self.cursor else {
             return Advance::Stop;
         };
@@ -193,7 +192,10 @@ impl Queue {
     }
 
     /// Jumps to a track by its index in the queue as the user sees it.
+    /// The queue carries on from there, so anything queued to play next
+    /// keeps its place but the point to resume from is forgotten.
     pub fn jump_to(&mut self, index: usize) -> Advance {
+        self.resume = None;
         match self.order.iter().position(|&item| item == index) {
             Some(cursor) => {
                 self.cursor = Some(cursor);
@@ -203,25 +205,15 @@ impl Queue {
         }
     }
 
-    /// Empties the queue.
-    pub fn clear(&mut self) {
-        self.tracks.clear();
-        self.order.clear();
-        self.queued.clear();
-        self.resume = None;
-        self.cursor = None;
-        self.stop_after_current = false;
-    }
-
     fn step_forward(&mut self) -> Advance {
         if !self.queued.is_empty() {
             let index = self.queued.remove(0);
             // Remember where the queue was, so it carries on from there
             // once the queued tracks have played.
-            if self.resume.is_none() {
-                self.resume = self.cursor;
-            }
-            return self.jump_to(index);
+            let resume = self.resume.or(self.cursor);
+            let advance = self.jump_to(index);
+            self.resume = resume;
+            return advance;
         }
         // The queued tracks are done: pick the queue back up where it was.
         let Some(cursor) = self.resume.take().or(self.cursor) else {
@@ -465,12 +457,29 @@ mod tests {
     }
 
     #[test]
-    fn clearing_empties_everything() {
-        let mut queue = queue_of(3);
-        queue.set_stop_after_current(true);
-        queue.clear();
-        assert!(queue.is_empty());
-        assert_eq!(queue.current(), None);
-        assert!(!queue.stop_after_current());
+    fn jumping_away_forgets_where_the_queue_was() {
+        let mut queue = queue_of(5);
+        queue.play_next(4);
+        assert_eq!(playing(&queue.advance()), Some(5), "the queued track");
+        assert_eq!(playing(&queue.jump_to(2)), Some(3), "the user moves away");
+        assert_eq!(
+            playing(&queue.advance()),
+            Some(4),
+            "the queue carries on from where the user jumped, not from before"
+        );
+    }
+
+    #[test]
+    fn turning_shuffle_on_during_a_queued_track_does_not_jump_back() {
+        let mut queue = queue_of(6);
+        queue.play_next(5);
+        assert_eq!(playing(&queue.advance()), Some(6));
+        queue.set_shuffle(true);
+        assert_eq!(
+            queue.current().map(|t| t.id),
+            Some(6),
+            "the queued track keeps playing"
+        );
+        assert!(matches!(queue.advance(), Advance::Play(_)));
     }
 }

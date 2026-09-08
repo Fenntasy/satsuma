@@ -64,6 +64,7 @@ type alias State =
     , repeat : Repeat
     , stopAfterCurrent : Bool
     , queueLength : Int
+    , error : Maybe String
     }
 
 
@@ -87,6 +88,7 @@ emptyState =
     , repeat = RepeatOff
     , stopAfterCurrent = False
     , queueLength = 0
+    , error = Nothing
     }
 
 
@@ -231,7 +233,9 @@ handleEvent name payload model =
         Just
             ( case Decode.decodeValue stateDecoder payload of
                 Ok state ->
-                    { model | state = state, error = Nothing }
+                    -- The backend reports playback failures in the state,
+                    -- e.g. a file that moved since it was scanned.
+                    { model | state = state, error = state.error }
 
                 Err error ->
                     { model | error = Just (Decode.errorToString error) }
@@ -248,15 +252,20 @@ handleEvent name payload model =
 
 stateDecoder : Decoder State
 stateDecoder =
-    Decode.map8 State
-        (Decode.field "status" statusDecoder)
-        (Decode.field "track" (Decode.nullable trackDecoder))
-        (Decode.field "position_ms" Decode.int)
-        (Decode.field "volume" Decode.float)
-        (Decode.field "shuffle" Decode.bool)
-        (Decode.field "repeat" repeatDecoder)
-        (Decode.field "stop_after_current" Decode.bool)
-        (Decode.field "queue_length" Decode.int)
+    Decode.map2
+        (\state error -> { state | error = error })
+        (Decode.map8 State
+            (Decode.field "status" statusDecoder)
+            (Decode.field "track" (Decode.nullable trackDecoder))
+            (Decode.field "position_ms" Decode.int)
+            (Decode.field "volume" Decode.float)
+            (Decode.field "shuffle" Decode.bool)
+            (Decode.field "repeat" repeatDecoder)
+            (Decode.field "stop_after_current" Decode.bool)
+            (Decode.field "queue_length" Decode.int)
+            |> Decode.map (\build -> build Nothing)
+        )
+        (Decode.field "error" (Decode.nullable Decode.string))
 
 
 statusDecoder : Decoder Status
@@ -349,7 +358,10 @@ view model =
                 , value (String.fromInt position)
                 , Attr.disabled (duration == 0)
                 , onInput (String.toInt >> Maybe.withDefault 0 >> SeekPreview)
-                , Html.Events.onMouseUp (SeekTo position)
+
+                -- `change` fires for the keyboard too, unlike `mouseup`,
+                -- and always ends the drag.
+                , Html.Events.on "change" (Decode.succeed (SeekTo position))
                 ]
                 []
             , span [ class "player-time" ] [ text (formatPosition duration) ]
