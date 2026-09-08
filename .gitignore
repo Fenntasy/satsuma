@@ -18,3 +18,7 @@ src-tauri/gen/schemas/
 # Secrets
 .env
 .env.*
+
+# Playwright
+test-results/
+playwright-report/

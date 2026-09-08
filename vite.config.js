@@ -4,7 +4,9 @@ import elm from "vite-plugin-elm";
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
-  plugins: [elm()],
+  // The Elm debugger opens a separate window, which the Tauri webview
+  // refuses, and the exception takes the app down on startup.
+  plugins: [elm({ debug: false })],
   clearScreen: false,
   server: {
     port: 1420,

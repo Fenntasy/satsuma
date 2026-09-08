@@ -9,13 +9,15 @@
     "tauri": "tauri",
     "test:elm": "elm-test",
     "lint:elm": "elm-review && elm-format --validate src tests review/src",
-    "check": "pnpm lint:elm && pnpm test:elm && pnpm build"
+    "check": "pnpm lint:elm && pnpm test:elm && pnpm build && pnpm test:e2e",
+    "test:e2e": "playwright test"
   },
   "packageManager": "pnpm@10.26.2",
   "dependencies": {
     "@tauri-apps/api": "2.11.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@tauri-apps/cli": "2.11.4",
     "elm": "0.19.2-0",
     "elm-format": "0.8.8",
