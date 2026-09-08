@@ -6,8 +6,11 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+use std::path::PathBuf;
+
 use crate::db::{Db, Folder, LibraryStats};
 use crate::scanner::{self, ScanProgress, ScanReport};
+use crate::settings;
 
 pub const SCAN_PROGRESS_EVENT: &str = "library://scan-progress";
 pub const SCAN_FINISHED_EVENT: &str = "library://scan-finished";
@@ -65,14 +68,34 @@ fn lock_status(status: &Mutex<ScanStatus>) -> MutexGuard<'_, ScanStatus> {
 pub struct AppState {
     pub db: Mutex<Db>,
     scan: Arc<Mutex<ScanStatus>>,
+    settings_path: PathBuf,
 }
 
 impl AppState {
     #[must_use]
-    pub fn new(db: Db) -> Self {
+    pub fn new(db: Db, settings_path: PathBuf) -> Self {
         AppState {
             db: Mutex::new(db),
             scan: Arc::new(Mutex::new(ScanStatus::default())),
+            settings_path,
+        }
+    }
+
+    /// Mirrors the library folders to the settings file, so they survive a
+    /// cache that has to be recreated.
+    fn remember_folders(&self) {
+        let folders = match self.with_db(Db::list_folders) {
+            Ok(folders) => folders,
+            Err(err) => {
+                log::warn!("cannot list the library folders ({err})");
+                return;
+            }
+        };
+        let settings = settings::Settings {
+            folders: folders.into_iter().map(|folder| folder.path).collect(),
+        };
+        if let Err(err) = settings::write(&self.settings_path, &settings) {
+            log::warn!("cannot save the library folders ({err})");
         }
     }
 
@@ -116,7 +139,9 @@ pub fn list_folders(state: State<'_, AppState>) -> Result<Vec<Folder>, String> {
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn add_folder(state: State<'_, AppState>, path: String) -> Result<Folder, String> {
-    state.with_db(|db| db.add_folder(&path))
+    let folder = state.with_db(|db| db.add_folder(&path))?;
+    state.remember_folders();
+    Ok(folder)
 }
 
 /// # Errors
@@ -125,7 +150,9 @@ pub fn add_folder(state: State<'_, AppState>, path: String) -> Result<Folder, St
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn remove_folder(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    state.with_db(|db| db.remove_folder(id))
+    state.with_db(|db| db.remove_folder(id))?;
+    state.remember_folders();
+    Ok(())
 }
 
 /// # Errors
@@ -210,14 +237,16 @@ fn run_scan(app: &AppHandle, mut guard: ScanGuard) {
         // Decide whether to run again while still holding the lock, so a
         // request that arrives now is either seen here or starts its own
         // scan afterwards, never dropped in between.
-        if !lock_status(&guard.scan).finish_pass() {
-            // Only the last pass is reported: telling the frontend a scan
-            // finished while another pass is starting would make the panel
-            // flip between finished and scanning.
-            emit(app, SCAN_FINISHED_EVENT, &outcome);
-            guard.handed_over = true;
-            return;
+        let mut status = lock_status(&guard.scan);
+        if status.finish_pass() {
+            continue;
         }
+        // Only the last pass is reported, and the slot stays held until the
+        // report is out: telling the frontend a scan finished while another
+        // one is starting would make the panel flip between the two.
+        emit(app, SCAN_FINISHED_EVENT, &outcome);
+        guard.handed_over = true;
+        return;
     }
 }
 

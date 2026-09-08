@@ -19,7 +19,10 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
 - Pin every dependency exactly: `save-exact` for npm (enforced by `.npmrc`),
   `=x.y.z` for Cargo.
 - Music files are the source of truth for tags, ratings and grouping; the
-  SQLite database is a rebuildable cache only.
+  SQLite database is a rebuildable cache only. What the user chose rather
+  than what was derived (the library folders) is mirrored to
+  `settings.json` in the app data directory, so recreating the cache never
+  loses it.
 - Grouping tag format: `A / B / C` (Type / Volume / Vibe); parser and
   formatter live in `src-tauri/src/grouping.rs`. It is read from the standard
   ID3 `TIT1` frame (lofty `ItemKey::ContentGroup`).
