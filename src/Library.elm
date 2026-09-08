@@ -23,6 +23,7 @@ import Bridge exposing (Outgoing(..))
 import Html exposing (Html, button, div, h2, input, li, p, progress, span, text, ul)
 import Html.Attributes as Attr exposing (class, disabled, title, type_, value)
 import Html.Events exposing (onClick, onDoubleClick, onInput)
+import Html.Lazy
 import Json.Decode as Decode exposing (Decoder)
 import Json.Encode as Encode
 import Player
@@ -512,10 +513,18 @@ reportText report =
 
 viewTree : Model -> Html Msg
 viewTree model =
+    -- Rebuilding the tree is the expensive part of this panel, and the
+    -- player reports its position several times a second: only redo it
+    -- when what it is built from changed.
+    Html.Lazy.lazy4 viewTreeFor model.rows model.grouping model.filter model.expanded
+
+
+viewTreeFor : List Tree.Row -> Grouping -> String -> Set String -> Html Msg
+viewTreeFor rows grouping filter expanded =
     let
         nodes : List Tree.Node
         nodes =
-            Tree.build model.grouping model.filter model.rows
+            Tree.build grouping filter rows
     in
     div [ class "tree-panel" ]
         [ h2 [] [ text "Browse" ]
@@ -524,7 +533,7 @@ viewTree model =
                 [ type_ "search"
                 , class "tree-filter"
                 , Attr.placeholder "Filter"
-                , Attr.value model.filter
+                , Attr.value filter
                 , Attr.attribute "aria-label" "Filter the library"
                 , onInput SetFilter
                 ]
@@ -534,19 +543,19 @@ viewTree model =
                 , Attr.attribute "aria-label" "Group the library by"
                 , onInput (groupingFromLabel >> SetGrouping)
                 ]
-                (List.map (viewGroupingOption model.grouping) Tree.groupings)
+                (List.map (viewGroupingOption grouping) Tree.groupings)
             ]
         , if List.isEmpty nodes then
-            p [ class "muted" ] [ text (emptyTreeText model) ]
+            p [ class "muted" ] [ text (emptyTreeText rows) ]
 
           else
-            ul [ class "tree" ] (List.map (viewNode model.expanded) nodes)
+            ul [ class "tree" ] (List.map (viewNode expanded) nodes)
         ]
 
 
-emptyTreeText : Model -> String
-emptyTreeText model =
-    if List.isEmpty model.rows then
+emptyTreeText : List Tree.Row -> String
+emptyTreeText rows =
+    if List.isEmpty rows then
         "Nothing scanned yet."
 
     else
@@ -579,12 +588,12 @@ viewNode expanded node =
 
         ids : List Int
         ids =
-            Tree.idsOf node
+            node.ids
     in
     li [ class "tree-node" ]
         [ div [ class "tree-row" ]
             [ case node.children of
-                Track _ ->
+                Track ->
                     span [ class "tree-bullet" ] [ text "♪" ]
 
                 Branches _ ->
@@ -616,22 +625,25 @@ viewNode expanded node =
                             )
                         ]
             , button
-                [ type_ "button"
-                , class "tree-label"
+                ([ type_ "button"
+                 , class "tree-label"
 
-                -- The full name: the sidebar is narrow and long album
-                -- titles all truncate to the same thing.
-                , title node.label
-                , onDoubleClick (Play ids)
-                , onClick
-                    (case node.children of
-                        Track _ ->
-                            Play ids
+                 -- The full name: the sidebar is narrow and long album
+                 -- titles all truncate to the same thing.
+                 , title node.label
+                 ]
+                    ++ (case node.children of
+                            Track ->
+                                -- One click plays it, so a double click
+                                -- must not restart it twice over.
+                                [ onClick (Play ids) ]
 
-                        Branches _ ->
-                            Toggle node.path
-                    )
-                ]
+                            Branches _ ->
+                                [ onClick (Toggle node.path)
+                                , onDoubleClick (Play ids)
+                                ]
+                       )
+                )
                 [ text node.label ]
             , viewCount node
             , button
@@ -650,7 +662,7 @@ viewNode expanded node =
                 else
                     text ""
 
-            Track _ ->
+            Track ->
                 text ""
         ]
 
@@ -658,7 +670,7 @@ viewNode expanded node =
 viewCount : Tree.Node -> Html Msg
 viewCount node =
     case node.children of
-        Track _ ->
+        Track ->
             span [ class "tree-count" ] [ text (formatDuration node.durationMs) ]
 
         Branches _ ->

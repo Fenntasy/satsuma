@@ -98,7 +98,6 @@ pub struct LibraryRow {
     pub title: Option<String>,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
-    pub year: Option<u32>,
     pub duration_ms: u64,
 }
 
@@ -385,7 +384,7 @@ impl Db {
     pub fn library_rows(&self) -> Result<Vec<LibraryRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, genre, artist, album, title, track_number, disc_number,
-                    year, duration_ms
+                    duration_ms
              FROM tracks
              ORDER BY genre IS NULL, genre, artist IS NULL, artist,
                       album IS NULL, album,
@@ -402,8 +401,7 @@ impl Db {
                     title: row.get(4)?,
                     track_number: row.get(5)?,
                     disc_number: row.get(6)?,
-                    year: row.get(7)?,
-                    duration_ms: row.get::<_, i64>(8)?.try_into().unwrap_or(0),
+                    duration_ms: row.get::<_, i64>(7)?.try_into().unwrap_or(0),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -778,7 +776,7 @@ mod tests {
         assert_eq!(row.album.as_deref(), Some("Album"));
         assert_eq!(row.title.as_deref(), Some("A"));
         assert_eq!(row.track_number, Some(3));
-        assert_eq!(row.year, Some(2024));
+        assert_eq!(row.disc_number, Some(1));
         assert_eq!(row.duration_ms, 1000);
     }
 

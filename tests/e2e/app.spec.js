@@ -26,7 +26,6 @@ function row(id, genre, artist, album, title, trackNumber) {
     title,
     track_number: trackNumber,
     disc_number: 1,
-    year: 2024,
     duration_ms: 60000,
   };
 }
@@ -395,6 +394,30 @@ test("clicking a track plays it", async ({ page }) => {
   await expect.poll(() => calls(page)).toEqual([
     { command: "play_tracks", args: { ids: [1] } },
   ]);
+});
+
+test("double-clicking a track plays it once, not three times", async ({ page }) => {
+  await open(page);
+  await page.getByRole("button", { name: "Indie" }).click();
+  await page.getByRole("button", { name: "Alpha" }).click();
+  await page.getByRole("button", { name: "First" }).click();
+  await clearCalls(page);
+
+  await page.getByRole("button", { name: "1. One" }).dblclick();
+  await expect.poll(() => calls(page)).toEqual([
+    { command: "play_tracks", args: { ids: [1] } },
+    { command: "play_tracks", args: { ids: [1] } },
+  ]);
+});
+
+test("double-clicking a branch plays everything under it", async ({ page }) => {
+  await open(page);
+  await clearCalls(page);
+  await page.getByRole("button", { name: "Indie" }).dblclick();
+  await expect.poll(() => calls(page)).toContainEqual({
+    command: "play_tracks",
+    args: { ids: [1, 2] },
+  });
 });
 
 test("the plus button queues everything under a branch", async ({ page }) => {

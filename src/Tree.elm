@@ -6,7 +6,6 @@ module Tree exposing
     , build
     , groupingLabel
     , groupings
-    , idsOf
     , rowDecoder
     )
 
@@ -31,6 +30,7 @@ type alias Row =
     , album : Maybe String
     , title : Maybe String
     , trackNumber : Maybe Int
+    , discNumber : Maybe Int
     , durationMs : Int
     }
 
@@ -73,24 +73,16 @@ type alias Node =
     , children : Children
     , trackCount : Int
     , durationMs : Int
+
+    -- Kept rather than walked on demand: the view needs them for every
+    -- visible row, and walking would cover the whole library each render.
+    , ids : List Int
     }
 
 
 type Children
     = Branches (List Node)
-    | Track Int
-
-
-{-| The tracks under a node, in the order they are shown.
--}
-idsOf : Node -> List Int
-idsOf node =
-    case node.children of
-        Track id ->
-            [ id ]
-
-        Branches children ->
-            List.concatMap idsOf children
+    | Track
 
 
 {-| Builds the tree, keeping only the rows that match `filter`.
@@ -108,7 +100,31 @@ build grouping filter rows =
     in
     kept
         |> sortFor grouping
-        |> group (levels grouping) ""
+        |> group (levels grouping) (groupingKey grouping)
+
+
+{-| The start of every path, so what is expanded under one grouping does
+not pre-expand an unrelated node under another.
+-}
+groupingKey : Grouping -> String
+groupingKey grouping =
+    case grouping of
+        GenreArtistAlbum ->
+            "genre"
+
+        ArtistAlbum ->
+            "artist"
+
+        AlbumOnly ->
+            "album"
+
+
+{-| Separates the parts of a path. A tag can contain a slash, so the
+separator has to be something a tag cannot hold.
+-}
+separator : String
+separator =
+    "\u{001F}"
 
 
 {-| Orders the rows by the levels they will be grouped under.
@@ -126,7 +142,12 @@ sortFor grouping rows =
             levels grouping
                 |> List.map (\level -> String.toLower (Maybe.withDefault unknown (level row)))
     in
-    List.sortBy key rows
+    -- The key is built once per row rather than once per comparison: it
+    -- lowercases up to three fields and allocates a list.
+    rows
+        |> List.map (\row -> ( key row, row ))
+        |> List.sortBy Tuple.first
+        |> List.map Tuple.second
 
 
 {-| Whether a row matches what was typed, in any of the fields the tree
@@ -178,7 +199,7 @@ group remaining prefix rows =
                         let
                             path : String
                             path =
-                                prefix ++ "/" ++ label
+                                prefix ++ separator ++ label
 
                             children : List Node
                             children =
@@ -189,17 +210,19 @@ group remaining prefix rows =
                         , children = Branches children
                         , trackCount = List.length inside
                         , durationMs = List.sum (List.map .durationMs inside)
+                        , ids = List.concatMap .ids children
                         }
                     )
 
 
 leaf : String -> Row -> Node
 leaf prefix row =
-    { path = prefix ++ "/" ++ String.fromInt row.id
+    { path = prefix ++ separator ++ String.fromInt row.id
     , label = trackLabel row
-    , children = Track row.id
+    , children = Track
     , trackCount = 1
     , durationMs = row.durationMs
+    , ids = [ row.id ]
     }
 
 
@@ -212,10 +235,27 @@ trackLabel row =
     in
     case row.trackNumber of
         Just number ->
-            String.fromInt number ++ ". " ++ title
+            discPrefix row ++ String.fromInt number ++ ". " ++ title
 
         Nothing ->
             title
+
+
+{-| The disc is shown only past the first, so a two-disc album does not
+repeat "1." and "2." with nothing to tell them apart.
+-}
+discPrefix : Row -> String
+discPrefix row =
+    case row.discNumber of
+        Just number ->
+            if number > 1 then
+                String.fromInt number ++ "."
+
+            else
+                ""
+
+        Nothing ->
+            ""
 
 
 unknown : String
@@ -251,11 +291,12 @@ groupBy key items =
 
 rowDecoder : Decoder Row
 rowDecoder =
-    Decode.map7 Row
+    Decode.map8 Row
         (Decode.field "id" Decode.int)
         (Decode.field "genre" (Decode.nullable Decode.string))
         (Decode.field "artist" (Decode.nullable Decode.string))
         (Decode.field "album" (Decode.nullable Decode.string))
         (Decode.field "title" (Decode.nullable Decode.string))
         (Decode.field "track_number" (Decode.nullable Decode.int))
+        (Decode.field "disc_number" (Decode.nullable Decode.int))
         (Decode.field "duration_ms" Decode.int)

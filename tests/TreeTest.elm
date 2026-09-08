@@ -88,28 +88,58 @@ suite =
             [ test "a branch answers with every track under it, in order" <|
                 \_ ->
                     Tree.build GenreArtistAlbum "" library
-                        |> List.concatMap Tree.idsOf
+                        |> List.concatMap .ids
                         |> Expect.equal [ 1, 2, 3, 4 ]
             , test "a track answers with itself" <|
                 \_ ->
                     Tree.build ArtistAlbum "" library
                         |> childrenOf "Alpha"
                         |> childrenOf "First"
-                        |> List.concatMap Tree.idsOf
+                        |> List.concatMap .ids
                         |> Expect.equal [ 1, 2 ]
             ]
         , describe "paths"
-            [ test "identify a node so what is open stays open" <|
+            [ test "a tag holding a slash cannot collide with a deeper node" <|
+                \_ ->
+                    let
+                        awkward : List Tree.Row
+                        awkward =
+                            [ row 1 "Indie/Rock" "Someone" "An album" "One" (Just 1)
+                            , row 2 "Indie" "Rock" "Another" "Two" (Just 1)
+                            ]
+                    in
+                    Tree.build GenreArtistAlbum "" awkward
+                        |> List.concatMap
+                            (\node ->
+                                case node.children of
+                                    Branches children ->
+                                        List.map .path children
+
+                                    Track ->
+                                        []
+                            )
+                        |> uniqueCount
+                        |> Expect.equal 2
+            , test "a track on a second disc says which disc it is on" <|
+                \_ ->
+                    Tree.build AlbumOnly "" [ secondDisc ]
+                        |> childrenOf "An album"
+                        |> labels
+                        |> Expect.equal [ "2.5. Deep cut" ]
+            , test "identify a node so what is open stays open" <|
                 \_ ->
                     Tree.build GenreArtistAlbum "" library
                         |> List.map .path
-                        |> Expect.equal [ "/Indie", "/Rock" ]
+                        |> Expect.equal [ "genre\u{001F}Indie", "genre\u{001F}Rock" ]
             , test "are unique per level" <|
                 \_ ->
                     Tree.build GenreArtistAlbum "" library
                         |> childrenOf "Indie"
                         |> List.map .path
-                        |> Expect.equal [ "/Indie/Alpha", "/Indie/Beta" ]
+                        |> Expect.equal
+                            [ "genre\u{001F}Indie\u{001F}Alpha"
+                            , "genre\u{001F}Indie\u{001F}Beta"
+                            ]
             ]
         ]
 
@@ -133,6 +163,7 @@ untagged =
     , album = Nothing
     , title = Nothing
     , trackNumber = Nothing
+    , discNumber = Nothing
     , durationMs = 1000
     }
 
@@ -145,8 +176,37 @@ row id genre artist album title trackNumber =
     , album = Just album
     , title = Just title
     , trackNumber = trackNumber
+    , discNumber = Just 1
     , durationMs = 1000
     }
+
+
+secondDisc : Tree.Row
+secondDisc =
+    { id = 7
+    , genre = Just "Indie"
+    , artist = Just "Someone"
+    , album = Just "An album"
+    , title = Just "Deep cut"
+    , trackNumber = Just 5
+    , discNumber = Just 2
+    , durationMs = 1000
+    }
+
+
+uniqueCount : List String -> Int
+uniqueCount paths =
+    paths
+        |> List.foldl
+            (\path seen ->
+                if List.member path seen then
+                    seen
+
+                else
+                    path :: seen
+            )
+            []
+        |> List.length
 
 
 labels : List Tree.Node -> List String
@@ -166,6 +226,6 @@ childrenOf label nodes =
                     Branches children ->
                         children
 
-                    Track _ ->
+                    Track ->
                         []
             )
