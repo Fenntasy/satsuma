@@ -16,6 +16,9 @@ export function installTauriStub(seed = {}) {
   /** Replies for commands, seeded before the page loads. */
   const replies = new Map(Object.entries(seed));
 
+  /** Commands that fail, and the value they fail with. */
+  const rejections = new Map();
+
   window.__TAURI_INTERNALS__ = {
     transformCallback(callback, once = false) {
       const id = nextCallbackId++;
@@ -44,14 +47,13 @@ export function installTauriStub(seed = {}) {
       }
 
       calls.push({ command, args });
+      if (rejections.has(command)) {
+        // Tauri rejects with the value the command returned, not with an
+        // Error, and a `Result<_, String>` therefore rejects with a string.
+        return Promise.reject(rejections.get(command));
+      }
       const reply = replies.get(command);
-      if (reply === undefined) {
-        return Promise.resolve(null);
-      }
-      if (reply instanceof Error) {
-        return Promise.reject(reply);
-      }
-      return Promise.resolve(reply);
+      return Promise.resolve(reply === undefined ? null : reply);
     },
   };
 
@@ -67,14 +69,14 @@ export function installTauriStub(seed = {}) {
       calls.length = 0;
     },
 
-    /** Makes `command` answer with `value`, or fail when given an Error. */
+    /** Makes `command` answer with `value`. */
     reply(command, value) {
       replies.set(command, value);
     },
 
-    /** Makes `command` fail with `message`, as a Tauri command error does. */
-    failWith(command, message) {
-      replies.set(command, new Error(message));
+    /** Makes `command` fail with `value`, the way the host does. */
+    failWith(command, value) {
+      rejections.set(command, value);
     },
 
     /** Delivers a backend event to the app. */

@@ -264,6 +264,15 @@ test("a failing command is shown", async ({ page }) => {
   await expect(page.getByText("the library is empty")).toBeVisible();
 });
 
+test("a failure that is not a string is still readable", async ({ page }) => {
+  await open(page);
+  await page.evaluate(() =>
+    window.__SATSUMA_TEST__.failWith("play_library", { kind: "no device" }),
+  );
+  await page.getByRole("button", { name: "Play all" }).click();
+  await expect(page.getByText('{"kind":"no device"}')).toBeVisible();
+});
+
 test("scan progress is shown while a scan runs", async ({ page }) => {
   await open(page);
   await emit(page, "library://scan-progress", {
