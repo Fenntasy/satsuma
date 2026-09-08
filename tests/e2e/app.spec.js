@@ -10,6 +10,27 @@ const FOLDERS = [
 
 const STATS = { track_count: 3, total_duration_ms: 754000 };
 
+/** The library as the backend reports it, already sorted. */
+const ROWS = [
+  row(1, "Indie", "Alpha", "First", "One", 1),
+  row(2, "Indie", "Alpha", "First", "Two", 2),
+  row(3, "Rock", "Beta", "Second", "Three", 1),
+];
+
+function row(id, genre, artist, album, title, trackNumber) {
+  return {
+    id,
+    genre,
+    artist,
+    album,
+    title,
+    track_number: trackNumber,
+    disc_number: 1,
+    year: 2024,
+    duration_ms: 60000,
+  };
+}
+
 function playerState(overrides = {}) {
   return {
     status: "stopped",
@@ -36,6 +57,7 @@ async function open(page) {
     ping: "satsuma test",
     list_folders: FOLDERS,
     library_stats: STATS,
+    library_rows: ROWS,
   });
   await page.goto("/");
   await expect(page.getByText("3 tracks")).toBeVisible();
@@ -77,7 +99,14 @@ test("asks for the library and the player state on startup", async ({ page }) =>
   await page.goto("/");
   await expect
     .poll(async () => (await calls(page)).map((call) => call.command).sort())
-    .toEqual(["library_stats", "list_folders", "ping", "player_state", "start_scan"]);
+    .toEqual([
+      "library_rows",
+      "library_stats",
+      "list_folders",
+      "ping",
+      "player_state",
+      "start_scan",
+    ]);
 });
 
 test("shows the library, its folders and that the backend answered", async ({
@@ -157,7 +186,7 @@ test("play and pause swap with the reported status", async ({ page }) => {
   await emit(page, "player://state", playerState({ status: "playing" }));
   await expect(page.getByTitle("Pause")).toBeVisible();
   await emit(page, "player://state", playerState({ status: "paused" }));
-  await expect(page.getByTitle("Play")).toBeVisible();
+  await expect(page.getByTitle("Play", { exact: true })).toBeVisible();
 });
 
 test("shuffle and stop after this track send the opposite of the state", async ({
@@ -322,6 +351,108 @@ test("Rescan asks the backend to scan again", async ({ page }) => {
   await expect
     .poll(async () => (await calls(page)).map((call) => call.command))
     .toEqual(["start_scan"]);
+});
+
+test("the tree groups the library by genre, artist and album", async ({ page }) => {
+  await open(page);
+  const tree = page.locator("ul.tree").first();
+  await expect(tree.getByRole("button", { name: "Indie" })).toBeVisible();
+  await expect(tree.getByRole("button", { name: "Rock" })).toBeVisible();
+  // The levels below stay closed until they are opened.
+  await expect(page.getByRole("button", { name: "Alpha" })).toHaveCount(0);
+});
+
+test("a branch opens and closes", async ({ page }) => {
+  await open(page);
+  await page.getByRole("button", { name: "Indie" }).click();
+  await expect(page.getByRole("button", { name: "Alpha" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Alpha" }).click();
+  await expect(page.getByRole("button", { name: "First" })).toBeVisible();
+
+  await page.getByRole("button", { name: "First" }).click();
+  await expect(page.getByRole("button", { name: "1. One" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Indie" }).click();
+  await expect(page.getByRole("button", { name: "Alpha" })).toHaveCount(0);
+});
+
+test("a branch says how many tracks are under it", async ({ page }) => {
+  await open(page);
+  await expect(page.locator(".tree-node", { hasText: "Indie" }).first()).toContainText(
+    "2",
+  );
+});
+
+test("clicking a track plays it", async ({ page }) => {
+  await open(page);
+  await page.getByRole("button", { name: "Indie" }).click();
+  await page.getByRole("button", { name: "Alpha" }).click();
+  await page.getByRole("button", { name: "First" }).click();
+  await clearCalls(page);
+
+  await page.getByRole("button", { name: "1. One" }).click();
+  await expect.poll(() => calls(page)).toEqual([
+    { command: "play_tracks", args: { ids: [1] } },
+  ]);
+});
+
+test("the plus button queues everything under a branch", async ({ page }) => {
+  await open(page);
+  await clearCalls(page);
+  await page.getByTitle("Add Indie to the queue").click();
+  await expect.poll(() => calls(page)).toEqual([
+    { command: "enqueue_tracks", args: { ids: [1, 2] } },
+  ]);
+});
+
+test("the filter narrows the tree and clearing it restores everything", async ({
+  page,
+}) => {
+  await open(page);
+  await page.getByLabel("Filter the library").fill("beta");
+  await expect(page.getByRole("button", { name: "Rock" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Indie" })).toHaveCount(0);
+
+  await page.getByLabel("Filter the library").fill("");
+  await expect(page.getByRole("button", { name: "Indie" })).toBeVisible();
+});
+
+test("a filter matching nothing says so", async ({ page }) => {
+  await open(page);
+  await page.getByLabel("Filter the library").fill("zzz");
+  await expect(page.getByText("Nothing matches that filter.")).toBeVisible();
+});
+
+test("the grouping can be changed", async ({ page }) => {
+  await open(page);
+  await page.getByLabel("Group the library by").selectOption("Artist / Album");
+  await expect(page.getByRole("button", { name: "Alpha" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Indie" })).toHaveCount(0);
+
+  await page.getByLabel("Group the library by").selectOption("Album");
+  await expect(page.getByRole("button", { name: "First" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Alpha" })).toHaveCount(0);
+});
+
+test("what is open stays open when the library is scanned again", async ({
+  page,
+}) => {
+  await open(page);
+  await page.getByRole("button", { name: "Indie" }).click();
+  await expect(page.getByRole("button", { name: "Alpha" })).toBeVisible();
+
+  await emit(page, "library://scan-finished", {
+    status: "finished",
+    added: 1,
+    updated: 0,
+    removed: 0,
+    failed: 0,
+    unreachable: 0,
+    emptied: 0,
+  });
+
+  await expect(page.getByRole("button", { name: "Alpha" })).toBeVisible();
 });
 
 test("scan progress is shown while a scan runs", async ({ page }) => {

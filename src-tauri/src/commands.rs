@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::db::{Db, Folder, LibraryStats};
+use crate::db::{Db, Folder, LibraryRow, LibraryStats};
 use crate::player::{self, Handle};
 use crate::queue::Repeat;
 use crate::scanner::{self, ScanProgress, ScanReport};
@@ -272,6 +272,50 @@ fn scan_once(app: &AppHandle, state: &State<'_, AppState>) -> ScanOutcome {
 }
 
 // PLAYER
+
+/// Everything the library tree groups by, for every track.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn library_rows(state: State<'_, AppState>) -> Result<Vec<LibraryRow>, String> {
+    state.with_db(Db::library_rows)
+}
+
+/// Replaces the queue with these tracks, in this order, and plays them.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read or the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn play_tracks(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let tracks = state.with_db(|db| db.tracks_by_ids(&ids))?;
+    if tracks.is_empty() {
+        return Err("none of those tracks are in the library any more".to_owned());
+    }
+    state.player.send(player::Command::Play {
+        tracks,
+        start: None,
+    })
+}
+
+/// Adds these tracks to the end of the queue.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read or the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn enqueue_tracks(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let tracks = state.with_db(|db| db.tracks_by_ids(&ids))?;
+    if tracks.is_empty() {
+        return Err("none of those tracks are in the library any more".to_owned());
+    }
+    state.player.send(player::Command::Enqueue(tracks))
+}
 
 /// Queues every track in the library and starts playing.
 ///

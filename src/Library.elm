@@ -20,13 +20,15 @@ the database.
 -}
 
 import Bridge exposing (Outgoing(..))
-import Html exposing (Html, button, div, h2, li, p, progress, span, text, ul)
+import Html exposing (Html, button, div, h2, input, li, p, progress, span, text, ul)
 import Html.Attributes as Attr exposing (class, disabled, title, type_, value)
-import Html.Events exposing (onClick)
+import Html.Events exposing (onClick, onDoubleClick, onInput)
 import Json.Decode as Decode exposing (Decoder)
 import Json.Encode as Encode
 import Player
 import Ports
+import Set exposing (Set)
+import Tree exposing (Children(..), Grouping(..))
 
 
 
@@ -76,6 +78,13 @@ type alias Model =
     , stats : Stats
     , scan : ScanState
     , error : Maybe String
+    , rows : List Tree.Row
+    , grouping : Grouping
+    , filter : String
+
+    -- Paths of the branches the user opened, so a rescan does not close
+    -- what they were looking at.
+    , expanded : Set String
     }
 
 
@@ -85,6 +94,10 @@ init =
       , stats = { trackCount = 0, totalDurationMs = 0 }
       , scan = Requested
       , error = Nothing
+      , rows = []
+      , grouping = GenreArtistAlbum
+      , filter = ""
+      , expanded = Set.empty
       }
     , Cmd.batch [ refresh, startScan ]
     )
@@ -95,6 +108,7 @@ refresh =
     Cmd.batch
         [ Ports.send (Invoke "list_folders" (Encode.object []))
         , Ports.send (Invoke "library_stats" (Encode.object []))
+        , Ports.send (Invoke "library_rows" (Encode.object []))
         ]
 
 
@@ -113,6 +127,11 @@ type Msg
     | StartScan
     | PlayLibrary
     | EnqueueLibrary
+    | Toggle String
+    | Play (List Int)
+    | Enqueue (List Int)
+    | SetFilter String
+    | SetGrouping Grouping
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -135,6 +154,35 @@ update msg model =
         EnqueueLibrary ->
             ( model, Player.enqueueLibrary )
 
+        Toggle path ->
+            ( { model | expanded = toggle path model.expanded }, Cmd.none )
+
+        Play ids ->
+            ( model, tracksCommand "play_tracks" ids )
+
+        Enqueue ids ->
+            ( model, tracksCommand "enqueue_tracks" ids )
+
+        SetFilter filter ->
+            ( { model | filter = filter }, Cmd.none )
+
+        SetGrouping grouping ->
+            ( { model | grouping = grouping }, Cmd.none )
+
+
+toggle : String -> Set String -> Set String
+toggle path expanded =
+    if Set.member path expanded then
+        Set.remove path expanded
+
+    else
+        Set.insert path expanded
+
+
+tracksCommand : String -> List Int -> Cmd Msg
+tracksCommand name ids =
+    Ports.send (Invoke name (Encode.object [ ( "ids", Encode.list Encode.int ids ) ]))
+
 
 {-| Handles the reply of a command this panel issued. Returns `Nothing` when
 the command is not one of ours.
@@ -147,6 +195,20 @@ handleInvokeResult command outcome model =
 
         "library_stats" ->
             Just (decodeInto statsDecoder outcome model (\stats m -> ( { m | stats = stats }, Cmd.none )))
+
+        "library_rows" ->
+            Just
+                (decodeInto (Decode.list Tree.rowDecoder)
+                    outcome
+                    model
+                    (\rows m -> ( { m | rows = rows }, Cmd.none ))
+                )
+
+        "play_tracks" ->
+            Just (decodeInto (Decode.succeed ()) outcome model (\_ m -> ( m, Cmd.none )))
+
+        "enqueue_tracks" ->
+            Just (decodeInto (Decode.succeed ()) outcome model (\_ m -> ( m, Cmd.none )))
 
         "pick_folder" ->
             Just
@@ -293,6 +355,7 @@ view model =
         , p [ class "library-stats" ] [ text (statsText model.stats) ]
         , viewScan model.scan
         , viewError model.error
+        , viewTree model
         , h2 [] [ text "Folders" ]
         , viewFolders model.folders
         , div [ class "library-actions" ]
@@ -445,6 +508,161 @@ reportText report =
                             summary
                    )
            )
+
+
+viewTree : Model -> Html Msg
+viewTree model =
+    let
+        nodes : List Tree.Node
+        nodes =
+            Tree.build model.grouping model.filter model.rows
+    in
+    div [ class "tree-panel" ]
+        [ h2 [] [ text "Browse" ]
+        , div [ class "tree-controls" ]
+            [ input
+                [ type_ "search"
+                , class "tree-filter"
+                , Attr.placeholder "Filter"
+                , Attr.value model.filter
+                , Attr.attribute "aria-label" "Filter the library"
+                , onInput SetFilter
+                ]
+                []
+            , Html.select
+                [ class "tree-grouping"
+                , Attr.attribute "aria-label" "Group the library by"
+                , onInput (groupingFromLabel >> SetGrouping)
+                ]
+                (List.map (viewGroupingOption model.grouping) Tree.groupings)
+            ]
+        , if List.isEmpty nodes then
+            p [ class "muted" ] [ text (emptyTreeText model) ]
+
+          else
+            ul [ class "tree" ] (List.map (viewNode model.expanded) nodes)
+        ]
+
+
+emptyTreeText : Model -> String
+emptyTreeText model =
+    if List.isEmpty model.rows then
+        "Nothing scanned yet."
+
+    else
+        "Nothing matches that filter."
+
+
+viewGroupingOption : Grouping -> Grouping -> Html Msg
+viewGroupingOption current grouping =
+    Html.option
+        [ Attr.value (Tree.groupingLabel grouping)
+        , Attr.selected (current == grouping)
+        ]
+        [ text (Tree.groupingLabel grouping) ]
+
+
+groupingFromLabel : String -> Grouping
+groupingFromLabel label =
+    Tree.groupings
+        |> List.filter (\grouping -> Tree.groupingLabel grouping == label)
+        |> List.head
+        |> Maybe.withDefault GenreArtistAlbum
+
+
+viewNode : Set String -> Tree.Node -> Html Msg
+viewNode expanded node =
+    let
+        isOpen : Bool
+        isOpen =
+            Set.member node.path expanded
+
+        ids : List Int
+        ids =
+            Tree.idsOf node
+    in
+    li [ class "tree-node" ]
+        [ div [ class "tree-row" ]
+            [ case node.children of
+                Track _ ->
+                    span [ class "tree-bullet" ] [ text "♪" ]
+
+                Branches _ ->
+                    button
+                        [ type_ "button"
+                        , class "tree-twisty"
+                        , Attr.attribute "aria-expanded"
+                            (if isOpen then
+                                "true"
+
+                             else
+                                "false"
+                            )
+                        , title
+                            (if isOpen then
+                                "Collapse"
+
+                             else
+                                "Expand"
+                            )
+                        , onClick (Toggle node.path)
+                        ]
+                        [ text
+                            (if isOpen then
+                                "▾"
+
+                             else
+                                "▸"
+                            )
+                        ]
+            , button
+                [ type_ "button"
+                , class "tree-label"
+
+                -- The full name: the sidebar is narrow and long album
+                -- titles all truncate to the same thing.
+                , title node.label
+                , onDoubleClick (Play ids)
+                , onClick
+                    (case node.children of
+                        Track _ ->
+                            Play ids
+
+                        Branches _ ->
+                            Toggle node.path
+                    )
+                ]
+                [ text node.label ]
+            , viewCount node
+            , button
+                [ type_ "button"
+                , class "icon-button tree-add"
+                , title ("Add " ++ node.label ++ " to the queue")
+                , onClick (Enqueue ids)
+                ]
+                [ text "+" ]
+            ]
+        , case node.children of
+            Branches children ->
+                if isOpen then
+                    ul [ class "tree" ] (List.map (viewNode expanded) children)
+
+                else
+                    text ""
+
+            Track _ ->
+                text ""
+        ]
+
+
+viewCount : Tree.Node -> Html Msg
+viewCount node =
+    case node.children of
+        Track _ ->
+            span [ class "tree-count" ] [ text (formatDuration node.durationMs) ]
+
+        Branches _ ->
+            span [ class "tree-count" ] [ text (String.fromInt node.trackCount) ]
 
 
 viewError : Maybe String -> Html Msg

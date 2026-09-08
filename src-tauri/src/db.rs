@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::tags::TrackTags;
@@ -84,6 +84,21 @@ pub struct Track {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
+    pub duration_ms: u64,
+}
+
+/// A track as the library tree needs it: what it is grouped by, and what
+/// is shown once a branch is open.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryRow {
+    pub id: i64,
+    pub genre: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub title: Option<String>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    pub year: Option<u32>,
     pub duration_ms: u64,
 }
 
@@ -359,6 +374,71 @@ impl Db {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(tracks)
+    }
+
+    /// Everything the library tree groups by, for every track.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on query failure.
+    pub fn library_rows(&self) -> Result<Vec<LibraryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, genre, artist, album, title, track_number, disc_number,
+                    year, duration_ms
+             FROM tracks
+             ORDER BY genre IS NULL, genre, artist IS NULL, artist,
+                      album IS NULL, album,
+                      disc_number IS NULL, disc_number,
+                      track_number IS NULL, track_number, title",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(LibraryRow {
+                    id: row.get(0)?,
+                    genre: row.get(1)?,
+                    artist: row.get(2)?,
+                    album: row.get(3)?,
+                    title: row.get(4)?,
+                    track_number: row.get(5)?,
+                    disc_number: row.get(6)?,
+                    year: row.get(7)?,
+                    duration_ms: row.get::<_, i64>(8)?.try_into().unwrap_or(0),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The tracks with these ids, in the order they were asked for. Ids
+    /// that are not in the library are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on query failure.
+    pub fn tracks_by_ids(&self, ids: &[i64]) -> Result<Vec<Track>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, path, title, artist, album, duration_ms
+             FROM tracks WHERE id = ?1",
+        )?;
+        let mut tracks = Vec::with_capacity(ids.len());
+        for id in ids {
+            let track = stmt
+                .query_row([id], |row| {
+                    Ok(Track {
+                        id: row.get(0)?,
+                        path: row.get(1)?,
+                        title: row.get(2)?,
+                        artist: row.get(3)?,
+                        album: row.get(4)?,
+                        duration_ms: row.get::<_, i64>(5)?.try_into().unwrap_or(0),
+                    })
+                })
+                .optional()?;
+            if let Some(track) = track {
+                tracks.push(track);
+            }
+        }
         Ok(tracks)
     }
 
@@ -667,6 +747,76 @@ mod tests {
             .filter_map(|track| track.title)
             .collect();
         assert_eq!(titles, ["A", "B", "Z", "C", "D"]);
+    }
+
+    #[test]
+    fn library_rows_carry_what_the_tree_groups_by() {
+        let db = Db::open_in_memory().expect("db");
+        let folder = db.add_folder("/music").expect("add");
+        db.upsert_tracks(&[TrackRecord {
+            folder_id: folder.id,
+            stamp: stamp("/music/a.mp3"),
+            tags: TrackTags {
+                title: Some("A".to_owned()),
+                artist: Some("Artist".to_owned()),
+                album: Some("Album".to_owned()),
+                genre: Some("Indie".to_owned()),
+                track_number: Some(3),
+                disc_number: Some(1),
+                year: Some(2024),
+                duration_ms: 1000,
+                ..TrackTags::default()
+            },
+        }])
+        .expect("upsert");
+
+        let rows = db.library_rows().expect("rows");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.genre.as_deref(), Some("Indie"));
+        assert_eq!(row.artist.as_deref(), Some("Artist"));
+        assert_eq!(row.album.as_deref(), Some("Album"));
+        assert_eq!(row.title.as_deref(), Some("A"));
+        assert_eq!(row.track_number, Some(3));
+        assert_eq!(row.year, Some(2024));
+        assert_eq!(row.duration_ms, 1000);
+    }
+
+    #[test]
+    fn tracks_are_fetched_in_the_order_they_were_asked_for() {
+        let db = Db::open_in_memory().expect("db");
+        let folder = db.add_folder("/music").expect("add");
+        let entry = |path: &str, title: &str| TrackRecord {
+            folder_id: folder.id,
+            stamp: stamp(path),
+            tags: TrackTags {
+                title: Some(title.to_owned()),
+                duration_ms: 1000,
+                ..TrackTags::default()
+            },
+        };
+        db.upsert_tracks(&[
+            entry("/music/a.mp3", "A"),
+            entry("/music/b.mp3", "B"),
+            entry("/music/c.mp3", "C"),
+        ])
+        .expect("upsert");
+        let ids: Vec<i64> = db
+            .list_tracks(None)
+            .expect("list")
+            .into_iter()
+            .map(|track| track.id)
+            .collect();
+
+        let asked = vec![ids[2], ids[0], 9999];
+        let titles: Vec<String> = db
+            .tracks_by_ids(&asked)
+            .expect("fetch")
+            .into_iter()
+            .filter_map(|track| track.title)
+            .collect();
+        assert_eq!(titles, ["C", "A"], "an unknown id is skipped, order kept");
+        assert!(db.tracks_by_ids(&[]).expect("fetch").is_empty());
     }
 
     #[test]

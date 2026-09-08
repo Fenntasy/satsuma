@@ -37,7 +37,9 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
   the old `OutputStream`. Decode with `Decoder::try_from(File)`, which is the
   only constructor that supports seeking.
 - UI language: English only.
-- No "various artists" / compilation grouping in the library, ever.
+- No "various artists" / compilation grouping in the library, ever: the
+  tree groups strictly by the tags a track carries, so an album whose tracks
+  name different artists appears under each of them (`src/Tree.elm`).
 
 ## Testing the frontend
 
