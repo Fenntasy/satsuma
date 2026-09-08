@@ -5,6 +5,7 @@ module Player exposing
     , State
     , Status(..)
     , Track
+    , enqueueLibrary
     , formatPosition
     , handleEvent
     , handleInvokeResult
@@ -64,6 +65,7 @@ type alias State =
     , repeat : Repeat
     , stopAfterCurrent : Bool
     , queueLength : Int
+    , seeksApplied : Int
     , error : Maybe String
     }
 
@@ -76,8 +78,10 @@ type alias Model =
     -- the handle does not jump back under the pointer.
     , seeking : Maybe Int
 
-    -- The position asked for, kept until the backend reports it.
-    , seekRequested : Maybe Int
+    -- The number of seeks the backend had carried out when the last one
+    -- was asked for. The preview ends when that number moves, which covers
+    -- a seek that failed as well as one that landed.
+    , seekRequestedAt : Maybe Int
     }
 
 
@@ -91,13 +95,14 @@ emptyState =
     , repeat = RepeatOff
     , stopAfterCurrent = False
     , queueLength = 0
+    , seeksApplied = 0
     , error = Nothing
     }
 
 
 init : ( Model, Cmd Msg )
 init =
-    ( { state = emptyState, error = Nothing, seeking = Nothing, seekRequested = Nothing }
+    ( { state = emptyState, error = Nothing, seeking = Nothing, seekRequestedAt = Nothing }
     , Ports.send (Invoke "player_state" (Encode.object []))
     )
 
@@ -107,6 +112,13 @@ init =
 playLibrary : Cmd msg
 playLibrary =
     Ports.send (Invoke "play_library" (Encode.object []))
+
+
+{-| Adds the whole library to the end of the queue, keeping what plays.
+-}
+enqueueLibrary : Cmd msg
+enqueueLibrary =
+    Ports.send (Invoke "enqueue_library" (Encode.object []))
 
 
 
@@ -147,7 +159,10 @@ update msg model =
         SeekTo positionMs ->
             -- The preview stays until the backend reports a position that
             -- has caught up, otherwise the handle snaps back for one tick.
-            ( { model | seeking = Just positionMs, seekRequested = Just positionMs }
+            ( { model
+                | seeking = Just positionMs
+                , seekRequestedAt = Just model.state.seeksApplied
+              }
             , command "player_seek" [ ( "positionMs", Encode.int positionMs ) ]
             )
 
@@ -255,15 +270,16 @@ handleEvent name payload model =
         Nothing
 
 
-{-| Drops the previewed seek position once the backend has caught up with
-the position that was asked for.
+{-| Drops the previewed seek position once the backend says it has carried
+the seek out. The reported position is not a reliable signal: a backward
+seek looks already reached, and a seek the format refuses never arrives.
 -}
 settleSeek : State -> Model -> Model
 settleSeek state model =
-    case model.seekRequested of
-        Just requested ->
-            if state.positionMs >= requested || state.status == Stopped then
-                { model | seeking = Nothing, seekRequested = Nothing }
+    case model.seekRequestedAt of
+        Just applied ->
+            if state.seeksApplied > applied then
+                { model | seeking = Nothing, seekRequestedAt = Nothing }
 
             else
                 model
@@ -289,6 +305,8 @@ stateDecoder =
             (Decode.field "repeat" repeatDecoder)
             (Decode.field "stop_after_current" Decode.bool)
             (Decode.field "queue_length" Decode.int)
+            |> Decode.andThen
+                (\build -> Decode.map build (Decode.field "seeks_applied" Decode.int))
             |> Decode.map (\build -> build Nothing)
         )
         (Decode.field "error" (Decode.nullable Decode.string))

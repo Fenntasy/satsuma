@@ -24,6 +24,11 @@ const TICK: Duration = Duration::from_millis(200);
 /// queue whose files all moved stops instead of racing to its end.
 const MAX_SKIPS: usize = 20;
 
+/// A track that ends sooner than this never really played: a tag-only or
+/// truncated file. Those count against [`MAX_SKIPS`] too, otherwise a queue
+/// of them would spin at channel speed.
+const MIN_PLAYTIME: Duration = Duration::from_millis(50);
+
 /// What the frontend can ask the player to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -76,6 +81,9 @@ pub struct State {
     pub repeat: Repeat,
     pub stop_after_current: bool,
     pub queue_length: usize,
+    /// How many seeks the player has carried out. The frontend watches this
+    /// to know its own seek was applied, whether it landed or failed.
+    pub seeks_applied: u64,
     /// Set when the last command could not be carried out, e.g. a file that
     /// disappeared since it was scanned.
     pub error: Option<String>,
@@ -170,6 +178,11 @@ struct Player {
     /// Bumped every time a track starts, so the end-of-track message of a
     /// track the user skipped away from is recognised and ignored.
     generation: u64,
+    seeks_applied: u64,
+    /// When the track that is playing started, and how many tracks in a row
+    /// have ended without really playing.
+    started_at: Option<std::time::Instant>,
+    empty_tracks: usize,
     notify: Sender<Command>,
 }
 
@@ -188,14 +201,22 @@ impl Player {
             duration: None,
             error: None,
             generation: 0,
+            seeks_applied: 0,
+            started_at: None,
+            empty_tracks: 0,
             notify,
         })
     }
 
     fn handle(&mut self, command: Command) {
         // Asking where we are must not erase why the last attempt failed.
-        if !matches!(command, Command::ReportState) {
+        if !matches!(command, Command::ReportState | Command::TrackFinished(_)) {
             self.error = None;
+        }
+        // Anything the user asks for is a fresh start for the "nothing
+        // plays" budget.
+        if !matches!(command, Command::TrackFinished(_) | Command::ReportState) {
+            self.empty_tracks = 0;
         }
         match command {
             Command::Play { tracks, start } => {
@@ -243,6 +264,20 @@ impl Player {
             Command::TrackFinished(generation) => {
                 // A track the user skipped away from also reports its end.
                 if generation == self.generation && self.status == Status::Playing {
+                    let played_nothing = self
+                        .started_at
+                        .is_some_and(|started| started.elapsed() < MIN_PLAYTIME);
+                    if played_nothing {
+                        self.empty_tracks += 1;
+                        if self.empty_tracks >= MAX_SKIPS {
+                            log::warn!("giving up after {MAX_SKIPS} tracks that played nothing");
+                            self.error = Some("these files hold no audio to play".to_owned());
+                            self.stop();
+                            return;
+                        }
+                    } else {
+                        self.empty_tracks = 0;
+                    }
                     let advance = self.queue.advance();
                     self.play_advance(advance);
                 }
@@ -298,6 +333,7 @@ impl Player {
         })));
         self.sink.play();
         self.status = Status::Playing;
+        self.started_at = Some(std::time::Instant::now());
         Ok(())
     }
 
@@ -329,9 +365,13 @@ impl Player {
         self.sink.clear();
         self.status = Status::Stopped;
         self.duration = None;
+        self.started_at = None;
     }
 
     fn seek(&mut self, position: Duration) {
+        // Counted even when it cannot be done, so the frontend stops
+        // showing the position the user asked for.
+        self.seeks_applied += 1;
         // Seeking an empty queue reports success without doing anything.
         if self.status == Status::Stopped || self.sink.empty() {
             return;
@@ -367,6 +407,7 @@ impl Player {
             repeat: self.queue.repeat(),
             stop_after_current: self.queue.stop_after_current(),
             queue_length: self.queue.len(),
+            seeks_applied: self.seeks_applied,
             error: self.error.clone(),
         }
     }
@@ -540,6 +581,12 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("the player must report its state at once");
         if first.error.is_some() {
+            assert!(
+                std::env::var("SATSUMA_REQUIRE_AUDIO").is_err(),
+                "no audio output ({:?}), but SATSUMA_REQUIRE_AUDIO is set: \
+                 the audio tests must not silently skip here",
+                first.error
+            );
             drop(handle);
             worker.join().expect("the player thread must stop");
             return None;
@@ -675,6 +722,30 @@ mod tests {
                 );
             },
         );
+        if played.is_none() {
+            eprintln!("skipped: this machine has no audio output");
+        }
+    }
+
+    #[test]
+    fn seeking_is_counted_even_when_it_cannot_be_done() {
+        let played = with_audio(vec![fixture(1)], |sender, states| {
+            let before = wait_for(states, Duration::from_secs(5), |state| {
+                state.status == Status::Playing
+            })
+            .expect("the track must start")
+            .seeks_applied;
+            sender
+                .send(Command::Seek(Duration::from_millis(200)))
+                .expect("send");
+            let after = wait_for(states, Duration::from_secs(5), |state| {
+                state.seeks_applied > before
+            });
+            assert!(
+                after.is_some(),
+                "the frontend needs to know the seek was handled"
+            );
+        });
         if played.is_none() {
             eprintln!("skipped: this machine has no audio output");
         }

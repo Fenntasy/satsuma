@@ -109,6 +109,9 @@ pub fn run() {
             commands::player_set_shuffle,
             commands::player_set_repeat,
             commands::player_set_stop_after_current,
+            commands::player_play_next,
+            commands::player_jump_to,
+            commands::enqueue_library,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Satsuma");

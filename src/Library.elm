@@ -112,6 +112,7 @@ type Msg
     | RemoveFolder Int
     | StartScan
     | PlayLibrary
+    | EnqueueLibrary
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -130,6 +131,9 @@ update msg model =
 
         PlayLibrary ->
             ( model, Player.playLibrary )
+
+        EnqueueLibrary ->
+            ( model, Player.enqueueLibrary )
 
 
 {-| Handles the reply of a command this panel issued. Returns `Nothing` when
@@ -299,6 +303,14 @@ view model =
                 , disabled (model.stats.trackCount == 0)
                 ]
                 [ text "Play all" ]
+            , button
+                [ type_ "button"
+                , class "button"
+                , onClick EnqueueLibrary
+                , disabled (model.stats.trackCount == 0)
+                , title "Add every track to the end of the queue"
+                ]
+                [ text "Queue all" ]
             , button [ type_ "button", class "button", onClick PickFolder ] [ text "Add folder" ]
             , button
                 [ type_ "button"

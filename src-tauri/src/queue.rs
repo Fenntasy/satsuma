@@ -207,6 +207,17 @@ impl Queue {
         }
     }
 
+    /// The ids of the tracks lined up after the current one, in playing
+    /// order.
+    #[cfg(test)]
+    pub(crate) fn order_after_cursor(&self) -> Vec<i64> {
+        let from = self.cursor.map_or(0, |cursor| cursor + 1);
+        self.order[from..]
+            .iter()
+            .filter_map(|index| self.tracks.get(*index).map(|track| track.id))
+            .collect()
+    }
+
     fn step_forward(&mut self) -> Advance {
         if !self.queued.is_empty() {
             let index = self.queued.remove(0);
@@ -437,35 +448,33 @@ mod tests {
     fn appending_under_shuffle_keeps_the_pending_order_and_adds_the_rest() {
         let mut queue = queue_of(4);
         queue.set_shuffle(true);
-        let pending: Vec<i64> = {
-            let mut seen = Vec::new();
-            let mut probe = Queue::new();
-            probe.replace(tracks(0), 0);
-            seen.clear();
-            seen
-        };
-        assert!(pending.is_empty(), "probe queue is only a placeholder");
+        // What is already lined up, in the order it will play.
+        let lined_up = queue.order_after_cursor();
 
         queue.append(
             tracks(3)
                 .into_iter()
-                .map(|mut t| {
-                    t.id += 100;
-                    t
+                .map(|mut track| {
+                    track.id += 100;
+                    track
                 })
                 .collect(),
         );
         assert_eq!(queue.len(), 7);
 
-        let mut played = vec![queue.current().map(|t| t.id).expect("a current track")];
+        let mut played = Vec::new();
         while let Advance::Play(track) = queue.skip_forward() {
             played.push(track.id);
         }
-        played.sort_unstable();
-        played.dedup();
-        assert_eq!(played.len(), 7, "every track plays exactly once");
+        assert_eq!(
+            played[..lined_up.len()],
+            lined_up[..],
+            "the tracks already lined up keep their order"
+        );
+        let mut added: Vec<i64> = played[lined_up.len()..].to_vec();
+        added.sort_unstable();
+        assert_eq!(added, [101, 102, 103], "the added tracks follow them");
     }
-
     #[test]
     fn a_shuffled_queue_repeats_with_every_track_again() {
         let mut queue = queue_of(6);

@@ -42,6 +42,7 @@ suite =
                                     , repeat = RepeatQueue
                                     , stopAfterCurrent = False
                                     , queueLength = 13
+                                    , seeksApplied = 0
                                     , error = Nothing
                                     }
                                 )
@@ -139,6 +140,7 @@ playingJson =
     , "repeat": "queue"
     , "stop_after_current": false
     , "queue_length": 13
+    , "seeks_applied": 0
     , "error": null
     }
     """
@@ -160,6 +162,7 @@ errorJson message =
     , "repeat": "off"
     , "stop_after_current": false
     , "queue_length": 0
+    , "seeks_applied": 0
     , "error": \"""" ++ message ++ """"
     }
     """
@@ -176,6 +179,7 @@ stateJson status repeat =
     , "repeat": \"""" ++ repeat ++ """"
     , "stop_after_current": false
     , "queue_length": 0
+    , "seeks_applied": 0
     , "error": null
     }
     """

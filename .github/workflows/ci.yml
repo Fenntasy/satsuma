@@ -59,6 +59,10 @@ jobs:
       - name: Rust tests
         run: cargo test
         working-directory: src-tauri
+        env:
+          # Fail rather than skip if the null audio device stops working,
+          # so the playback tests cannot quietly become no-ops.
+          SATSUMA_REQUIRE_AUDIO: "1"
 
   build-linux:
     name: Build Linux app

@@ -381,6 +381,43 @@ pub fn player_set_repeat(state: State<'_, AppState>, repeat: String) -> Result<(
     state.player.send(player::Command::SetRepeat(repeat))
 }
 
+/// Queues a track of the current queue to play right after the current one.
+///
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_play_next(state: State<'_, AppState>, index: usize) -> Result<(), String> {
+    state.player.send(player::Command::PlayNext(index))
+}
+
+/// Plays the track at `index` in the current queue now.
+///
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_jump_to(state: State<'_, AppState>, index: usize) -> Result<(), String> {
+    state.player.send(player::Command::JumpTo(index))
+}
+
+/// Adds every track of the library to the end of the queue.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read or the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn enqueue_library(state: State<'_, AppState>) -> Result<(), String> {
+    let tracks = state.with_db(|db| db.list_tracks(None))?;
+    if tracks.is_empty() {
+        return Err("the library is empty; scan a folder first".to_owned());
+    }
+    state.player.send(player::Command::Enqueue(tracks))
+}
+
 /// # Errors
 ///
 /// Returns a message when the player stopped.
