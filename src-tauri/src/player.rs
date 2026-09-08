@@ -272,6 +272,10 @@ impl Player {
             Command::TrackFinished(generation) => {
                 // A track the user skipped away from also reports its end.
                 if generation == self.generation && self.status == Status::Playing {
+                    // Moving to the next track clears what went wrong with
+                    // an earlier one; a failure during this advance sets it
+                    // again below.
+                    self.error = None;
                     let played_nothing = self
                         .started_at
                         .is_some_and(|started| started.elapsed() < MIN_PLAYTIME);
@@ -702,6 +706,37 @@ mod tests {
             assert!(
                 playing.error.is_some(),
                 "the skipped file is still reported"
+            );
+        });
+        if played.is_none() {
+            eprintln!("skipped: this machine has no audio output");
+        }
+    }
+
+    #[test]
+    fn a_skipped_file_is_forgotten_once_the_music_plays_on() {
+        let missing = Track {
+            id: 9,
+            path: "/definitely/missing.mp3".to_owned(),
+            title: None,
+            artist: None,
+            album: None,
+            duration_ms: 1000,
+        };
+        let played = with_audio(vec![missing, fixture(2), fixture(3)], |_sender, states| {
+            let skipped = wait_for(states, Duration::from_secs(5), |state| {
+                state.track.as_ref().is_some_and(|track| track.id == 2)
+            })
+            .expect("the next playable track must start");
+            assert!(skipped.error.is_some(), "the skip is reported at first");
+
+            let later = wait_for(states, Duration::from_secs(10), |state| {
+                state.track.as_ref().is_some_and(|track| track.id == 3)
+            })
+            .expect("the queue must reach the third track");
+            assert_eq!(
+                later.error, None,
+                "a file skipped earlier must not still be reported"
             );
         });
         if played.is_none() {
