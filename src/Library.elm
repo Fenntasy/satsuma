@@ -10,6 +10,7 @@ module Library exposing
     , handleEvent
     , handleInvokeResult
     , init
+    , reportText
     , update
     , view
     )
@@ -55,6 +56,7 @@ type alias Report =
     , updated : Int
     , removed : Int
     , failed : Int
+    , unreachable : Int
     }
 
 
@@ -237,11 +239,12 @@ outcomeDecoder =
                 case status of
                     "finished" ->
                         Decode.map Finished
-                            (Decode.map4 Report
+                            (Decode.map5 Report
                                 (Decode.field "added" Decode.int)
                                 (Decode.field "updated" Decode.int)
                                 (Decode.field "removed" Decode.int)
                                 (Decode.field "failed" Decode.int)
+                                (Decode.field "unreachable" Decode.int)
                             )
 
                     "failed" ->
@@ -349,26 +352,41 @@ viewScan scan =
                 ]
 
         Finished report ->
-            p [ class "scan-summary" ]
-                [ text
-                    ("Scan finished: "
-                        ++ String.fromInt report.added
-                        ++ " added, "
-                        ++ String.fromInt report.updated
-                        ++ " updated, "
-                        ++ String.fromInt report.removed
-                        ++ " removed"
-                        ++ (if report.failed > 0 then
-                                ", " ++ String.fromInt report.failed ++ " unreadable"
-
-                            else
-                                ""
-                           )
-                    )
-                ]
+            p [ class "scan-summary" ] [ text (reportText report) ]
 
         Failed error ->
             p [ class "error" ] [ text ("Scan failed: " ++ error) ]
+
+
+{-| The one-line summary shown when a scan ends.
+-}
+reportText : Report -> String
+reportText report =
+    let
+        counted : Int -> String -> List String -> List String
+        counted count label rest =
+            if count > 0 then
+                (String.fromInt count ++ " " ++ label) :: rest
+
+            else
+                rest
+    in
+    "Scan finished: "
+        ++ (counted report.added "added" []
+                |> counted report.updated "updated"
+                |> counted report.removed "removed"
+                |> counted report.failed "unreadable"
+                |> counted report.unreachable "folders unreachable"
+                |> List.reverse
+                |> String.join ", "
+                |> (\summary ->
+                        if String.isEmpty summary then
+                            "nothing changed"
+
+                        else
+                            summary
+                   )
+           )
 
 
 viewError : Maybe String -> Html Msg

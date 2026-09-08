@@ -1,15 +1,23 @@
 //! Incremental folder scanning: walks the library folders, reads tags for
 //! new or changed files, and prunes files that disappeared.
+//!
+//! The scanner only holds the database lock while it writes a batch, so the
+//! rest of the application stays responsive while a large library is being
+//! scanned. Walking the filesystem and reading tags happen without the lock.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-use crate::db::{Db, DbError, FileStamp, Folder};
+use crate::db::{Db, DbError, FileStamp, Folder, TrackRecord};
 use crate::tags::{is_audio_file, read_tags};
+
+/// How many tracks are written per transaction.
+const BATCH_SIZE: usize = 200;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanReport {
@@ -17,6 +25,9 @@ pub struct ScanReport {
     pub updated: u64,
     pub removed: u64,
     pub failed: u64,
+    /// Folders whose root could not be read, and which were therefore left
+    /// untouched instead of having their tracks pruned.
+    pub unreachable: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,39 +37,67 @@ pub struct ScanProgress {
     pub path: String,
 }
 
-/// Scans every folder, calling `on_progress` after each file is examined.
+/// Scans every library folder, calling `on_progress` after each file is
+/// examined.
+///
+/// The folder list is read from the database when the scan starts. Folders
+/// whose root is not reachable are skipped entirely, so an unplugged drive
+/// never empties the cache.
 ///
 /// # Errors
 ///
 /// Returns an error when the database cannot be read or written. Unreadable
 /// audio files are counted in [`ScanReport::failed`] instead.
 pub fn scan(
-    db: &Db,
-    folders: &[Folder],
+    db: &Mutex<Db>,
     mut on_progress: impl FnMut(ScanProgress),
 ) -> Result<ScanReport, DbError> {
+    let folders = with_db(db, Db::list_folders)?;
     let mut report = ScanReport::default();
+
     let mut files: Vec<(i64, FileStamp)> = Vec::new();
-    for folder in folders {
-        for file in audio_files(Path::new(&folder.path)) {
-            files.push((folder.id, file));
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut scanned_folders: Vec<&Folder> = Vec::new();
+    for folder in &folders {
+        let root = Path::new(&folder.path);
+        if !root.is_dir() {
+            log::warn!("skipping unreachable folder: {}", folder.path);
+            report.unreachable += 1;
+            continue;
+        }
+        scanned_folders.push(folder);
+        for file in audio_files(root) {
+            // A file can be reached through two folders when one is nested
+            // inside the other, or through a symlink. Keep the first.
+            if seen.insert(file.path.clone()) {
+                files.push((folder.id, file));
+            }
         }
     }
     let total = files.len() as u64;
 
     let mut known: HashMap<String, FileStamp> = HashMap::new();
-    for folder in folders {
-        for stamp in db.file_stamps(folder.id)? {
-            known.insert(stamp.path.clone(), stamp);
+    with_db(db, |db| {
+        for folder in &scanned_folders {
+            for stamp in db.file_stamps(folder.id)? {
+                known.insert(stamp.path.clone(), stamp);
+            }
         }
-    }
+        Ok(())
+    })?;
 
-    for (index, (folder_id, stamp)) in files.iter().enumerate() {
+    let mut pending: Vec<TrackRecord> = Vec::new();
+    for (index, (folder_id, stamp)) in files.into_iter().enumerate() {
+        let path = stamp.path.clone();
         match known.remove(&stamp.path) {
-            Some(previous) if previous == *stamp => {}
+            Some(previous) if previous == stamp => {}
             previous => match read_tags(Path::new(&stamp.path)) {
                 Ok(tags) => {
-                    db.upsert_track(*folder_id, stamp, &tags)?;
+                    pending.push(TrackRecord {
+                        folder_id,
+                        stamp,
+                        tags,
+                    });
                     if previous.is_some() {
                         report.updated += 1;
                     } else {
@@ -71,18 +110,31 @@ pub fn scan(
                 }
             },
         }
+        if pending.len() >= BATCH_SIZE {
+            with_db(db, |db| db.upsert_tracks(&pending))?;
+            pending.clear();
+        }
         on_progress(ScanProgress {
             scanned: index as u64 + 1,
             total,
-            path: stamp.path.clone(),
+            path,
         });
     }
+    if !pending.is_empty() {
+        with_db(db, |db| db.upsert_tracks(&pending))?;
+    }
 
-    for path in known.into_keys() {
-        db.remove_track(&path)?;
-        report.removed += 1;
+    if !known.is_empty() {
+        let gone: Vec<String> = known.into_keys().collect();
+        report.removed = gone.len() as u64;
+        with_db(db, |db| db.remove_tracks(&gone))?;
     }
     Ok(report)
+}
+
+fn with_db<T>(db: &Mutex<Db>, f: impl FnOnce(&Db) -> Result<T, DbError>) -> Result<T, DbError> {
+    let db = db.lock().map_err(|_| DbError::Poisoned)?;
+    f(&db)
 }
 
 fn audio_files(root: &Path) -> impl Iterator<Item = FileStamp> {
@@ -111,37 +163,41 @@ fn audio_files(root: &Path) -> impl Iterator<Item = FileStamp> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Mutex;
 
     use lofty::prelude::Accessor;
 
-    use super::{scan, ScanProgress, ScanReport};
+    use super::{scan, ScanProgress, ScanReport, BATCH_SIZE};
     use crate::db::Db;
     use crate::tags::tests::{sample_tag, tagged_copy, FIXTURE};
 
-    fn setup() -> (tempfile::TempDir, Db, Vec<crate::db::Folder>) {
+    fn setup() -> (tempfile::TempDir, Mutex<Db>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Db::open_in_memory().expect("db");
-        let folder = db
-            .add_folder(&dir.path().to_string_lossy())
+        db.add_folder(&dir.path().to_string_lossy())
             .expect("add folder");
-        (dir, db, vec![folder])
+        (dir, Mutex::new(db))
     }
 
-    fn scan_all(db: &Db, folders: &[crate::db::Folder]) -> (ScanReport, Vec<ScanProgress>) {
+    fn scan_all(db: &Mutex<Db>) -> (ScanReport, Vec<ScanProgress>) {
         let mut progress = Vec::new();
-        let report = scan(db, folders, |p| progress.push(p)).expect("scan");
+        let report = scan(db, |p| progress.push(p)).expect("scan");
         (report, progress)
+    }
+
+    fn track_count(db: &Mutex<Db>) -> u64 {
+        db.lock().expect("lock").stats().expect("stats").track_count
     }
 
     #[test]
     fn adds_updates_and_removes_files_across_scans() {
-        let (dir, db, folders) = setup();
+        let (dir, db) = setup();
         fs::create_dir(dir.path().join("sub")).expect("mkdir");
         tagged_copy(dir.path(), "one.mp3", &sample_tag());
         let two = tagged_copy(&dir.path().join("sub"), "two.mp3", &sample_tag());
         fs::write(dir.path().join("cover.jpg"), b"not audio").expect("write");
 
-        let (report, progress) = scan_all(&db, &folders);
+        let (report, progress) = scan_all(&db);
         assert_eq!(
             report,
             ScanReport {
@@ -152,10 +208,10 @@ mod tests {
         assert_eq!(progress.len(), 2);
         assert_eq!(progress[1].scanned, 2);
         assert_eq!(progress[1].total, 2);
-        assert_eq!(db.stats().expect("stats").track_count, 2);
+        assert_eq!(track_count(&db), 2);
 
         // Nothing changed: nothing is re-read.
-        let (report, _) = scan_all(&db, &folders);
+        let (report, _) = scan_all(&db);
         assert_eq!(report, ScanReport::default());
 
         // Change one file (size changes because the title is longer).
@@ -163,7 +219,7 @@ mod tests {
         tag.set_title("A much longer title than before".into());
         tagged_copy(dir.path(), "one.mp3", &tag);
         fs::remove_file(&two).expect("remove");
-        let (report, _) = scan_all(&db, &folders);
+        let (report, _) = scan_all(&db);
         assert_eq!(
             report,
             ScanReport {
@@ -172,25 +228,85 @@ mod tests {
                 ..ScanReport::default()
             }
         );
-        assert_eq!(db.stats().expect("stats").track_count, 1);
+        assert_eq!(track_count(&db), 1);
     }
 
     #[test]
     fn unreadable_audio_files_are_counted_not_fatal() {
-        let (dir, db, folders) = setup();
+        let (dir, db) = setup();
         fs::write(dir.path().join("broken.mp3"), b"garbage").expect("write");
         fs::copy(FIXTURE, dir.path().join("fine.mp3")).expect("copy");
-        let (report, _) = scan_all(&db, &folders);
+        let (report, _) = scan_all(&db);
         assert_eq!(report.added, 1);
         assert_eq!(report.failed, 1);
     }
 
     #[test]
+    fn an_unreachable_folder_keeps_its_tracks() {
+        let (dir, db) = setup();
+        fs::copy(FIXTURE, dir.path().join("song.mp3")).expect("copy");
+        let (report, _) = scan_all(&db);
+        assert_eq!(report.added, 1);
+
+        // The drive goes away: the folder root can no longer be read.
+        fs::remove_dir_all(dir.path()).expect("remove root");
+        let (report, progress) = scan_all(&db);
+        assert_eq!(
+            report,
+            ScanReport {
+                unreachable: 1,
+                ..ScanReport::default()
+            }
+        );
+        assert!(progress.is_empty());
+        assert_eq!(track_count(&db), 1, "the cached track must survive");
+    }
+
+    #[test]
+    fn a_file_reachable_through_two_folders_is_scanned_once() {
+        let (dir, db) = setup();
+        let nested = dir.path().join("nested");
+        fs::create_dir(&nested).expect("mkdir");
+        fs::copy(FIXTURE, nested.join("song.mp3")).expect("copy");
+        db.lock()
+            .expect("lock")
+            .add_folder(&nested.to_string_lossy())
+            .expect("add nested folder");
+
+        let (report, progress) = scan_all(&db);
+        assert_eq!(report.added, 1);
+        assert_eq!(progress.len(), 1);
+        assert_eq!(track_count(&db), 1);
+
+        // A second scan must see the file as unchanged, not as new again.
+        let (report, _) = scan_all(&db);
+        assert_eq!(report, ScanReport::default());
+    }
+
+    #[test]
+    fn writes_more_files_than_fit_in_one_batch() {
+        let (dir, db) = setup();
+        for index in 0..=BATCH_SIZE {
+            fs::copy(FIXTURE, dir.path().join(format!("song{index}.mp3"))).expect("copy");
+        }
+        let (report, _) = scan_all(&db);
+        let expected = u64::try_from(BATCH_SIZE + 1).expect("fits");
+        assert_eq!(report.added, expected);
+        assert_eq!(track_count(&db), expected);
+    }
+
+    #[test]
     fn missing_folder_yields_no_files() {
         let db = Db::open_in_memory().expect("db");
-        let folder = db.add_folder("/definitely/missing").expect("add");
-        let (report, progress) = scan_all(&db, &[folder]);
-        assert_eq!(report, ScanReport::default());
+        db.add_folder("/definitely/missing").expect("add");
+        let (report, progress) = scan_all(&Mutex::new(db));
+        assert_eq!(
+            report,
+            ScanReport {
+                unreachable: 1,
+                ..ScanReport::default()
+            }
+        );
         assert!(progress.is_empty());
     }
 }

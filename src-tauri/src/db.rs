@@ -3,12 +3,43 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use crate::tags::TrackTags;
 
 const SCHEMA_VERSION: i64 = 1;
+
+/// Writes one track, ignoring tracks whose folder was removed since the scan
+/// collected them.
+const UPSERT_TRACK: &str = "INSERT INTO tracks (
+        folder_id, path, mtime, size, title, artist, album, album_artist,
+        track_number, disc_number, genre, year, duration_ms, rating,
+        grouping_raw, grouping_kind, grouping_volume, grouping_vibe,
+        has_embedded_cover
+    )
+    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+           ?15, ?16, ?17, ?18, ?19
+    WHERE EXISTS (SELECT 1 FROM folders WHERE id = ?1)
+    ON CONFLICT(path) DO UPDATE SET
+        folder_id = excluded.folder_id,
+        mtime = excluded.mtime,
+        size = excluded.size,
+        title = excluded.title,
+        artist = excluded.artist,
+        album = excluded.album,
+        album_artist = excluded.album_artist,
+        track_number = excluded.track_number,
+        disc_number = excluded.disc_number,
+        genre = excluded.genre,
+        year = excluded.year,
+        duration_ms = excluded.duration_ms,
+        rating = excluded.rating,
+        grouping_raw = excluded.grouping_raw,
+        grouping_kind = excluded.grouping_kind,
+        grouping_volume = excluded.grouping_volume,
+        grouping_vibe = excluded.grouping_vibe,
+        has_embedded_cover = excluded.has_embedded_cover";
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -16,6 +47,10 @@ pub enum DbError {
     Sqlite(#[from] rusqlite::Error),
     #[error("folder already in the library: {0}")]
     DuplicateFolder(String),
+    #[error("the database is locked by a thread that crashed")]
+    Poisoned,
+    #[error("the library was created by a newer version of Satsuma (schema {0})")]
+    SchemaTooNew(i64),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -30,6 +65,14 @@ pub struct Folder {
 pub struct LibraryStats {
     pub track_count: u64,
     pub total_duration_ms: u64,
+}
+
+/// A track to write to the cache, as produced by a scan.
+#[derive(Clone, Debug)]
+pub struct TrackRecord {
+    pub folder_id: i64,
+    pub stamp: FileStamp,
+    pub tags: TrackTags,
 }
 
 /// A file as recorded by the last scan, used to skip unchanged files.
@@ -66,6 +109,7 @@ impl Db {
 
     fn from_connection(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let db = Db { conn };
         db.migrate()?;
@@ -76,6 +120,12 @@ impl Db {
         let version: i64 = self
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(DbError::SchemaTooNew(version));
+        }
+        if version == SCHEMA_VERSION {
+            return Ok(());
+        }
         if version < 1 {
             self.conn.execute_batch(
                 "CREATE TABLE folders (
@@ -183,73 +233,61 @@ impl Db {
         Ok(stamps)
     }
 
-    /// Inserts or replaces the track at `stamp.path`.
+    /// Inserts or replaces a batch of tracks in a single transaction.
+    ///
+    /// Tracks whose folder disappeared since the scan started are skipped
+    /// rather than aborting the batch.
     ///
     /// # Errors
     ///
     /// Returns an error on query failure.
-    pub fn upsert_track(&self, folder_id: i64, stamp: &FileStamp, tags: &TrackTags) -> Result<()> {
-        let grouping = tags.grouping.unwrap_or_default();
-        self.conn.execute(
-            "INSERT INTO tracks (
-                folder_id, path, mtime, size, title, artist, album, album_artist,
-                track_number, disc_number, genre, year, duration_ms, rating,
-                grouping_raw, grouping_kind, grouping_volume, grouping_vibe,
-                has_embedded_cover
-            ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19
-            )
-            ON CONFLICT(path) DO UPDATE SET
-                folder_id = excluded.folder_id,
-                mtime = excluded.mtime,
-                size = excluded.size,
-                title = excluded.title,
-                artist = excluded.artist,
-                album = excluded.album,
-                album_artist = excluded.album_artist,
-                track_number = excluded.track_number,
-                disc_number = excluded.disc_number,
-                genre = excluded.genre,
-                year = excluded.year,
-                duration_ms = excluded.duration_ms,
-                rating = excluded.rating,
-                grouping_raw = excluded.grouping_raw,
-                grouping_kind = excluded.grouping_kind,
-                grouping_volume = excluded.grouping_volume,
-                grouping_vibe = excluded.grouping_vibe,
-                has_embedded_cover = excluded.has_embedded_cover",
-            params![
-                folder_id,
-                stamp.path,
-                stamp.mtime,
-                stamp.size,
-                tags.title,
-                tags.artist,
-                tags.album,
-                tags.album_artist,
-                tags.track_number,
-                tags.disc_number,
-                tags.genre,
-                tags.year,
-                i64::try_from(tags.duration_ms).unwrap_or(i64::MAX),
-                tags.rating,
-                tags.grouping_raw,
-                grouping.kind.map(|kind| serde_variant(&kind)),
-                grouping.volume.map(|volume| serde_variant(&volume)),
-                grouping.vibe.map(|vibe| serde_variant(&vibe)),
-                tags.has_embedded_cover,
-            ],
-        )?;
+    pub fn upsert_tracks(&self, tracks: &[TrackRecord]) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = transaction.prepare_cached(UPSERT_TRACK)?;
+            for track in tracks {
+                let grouping = track.tags.grouping.unwrap_or_default();
+                stmt.execute(params![
+                    track.folder_id,
+                    track.stamp.path,
+                    track.stamp.mtime,
+                    track.stamp.size,
+                    track.tags.title,
+                    track.tags.artist,
+                    track.tags.album,
+                    track.tags.album_artist,
+                    track.tags.track_number,
+                    track.tags.disc_number,
+                    track.tags.genre,
+                    track.tags.year,
+                    i64::try_from(track.tags.duration_ms).unwrap_or(i64::MAX),
+                    track.tags.rating,
+                    track.tags.grouping_raw,
+                    grouping.kind.map(|kind| serde_variant(&kind)),
+                    grouping.volume.map(|volume| serde_variant(&volume)),
+                    grouping.vibe.map(|vibe| serde_variant(&vibe)),
+                    track.tags.has_embedded_cover,
+                ])?;
+            }
+        }
+        transaction.commit()?;
         Ok(())
     }
 
+    /// Removes a batch of tracks by path, in a single transaction.
+    ///
     /// # Errors
     ///
     /// Returns an error on query failure.
-    pub fn remove_track(&self, path: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM tracks WHERE path = ?1", [path])?;
+    pub fn remove_tracks(&self, paths: &[String]) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = transaction.prepare_cached("DELETE FROM tracks WHERE path = ?1")?;
+            for path in paths {
+                stmt.execute([path])?;
+            }
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -257,25 +295,21 @@ impl Db {
     ///
     /// Returns an error on query failure.
     pub fn stats(&self) -> Result<LibraryStats> {
-        let stats = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0) FROM tracks",
-                [],
-                |row| {
-                    Ok(LibraryStats {
-                        track_count: row.get::<_, i64>(0)?.try_into().unwrap_or(0),
-                        total_duration_ms: row.get::<_, i64>(1)?.try_into().unwrap_or(0),
-                    })
-                },
-            )
-            .optional()?
-            .unwrap_or_default();
+        let stats = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0) FROM tracks",
+            [],
+            |row| {
+                Ok(LibraryStats {
+                    track_count: row.get::<_, i64>(0)?.try_into().unwrap_or(0),
+                    total_duration_ms: row.get::<_, i64>(1)?.try_into().unwrap_or(0),
+                })
+            },
+        )?;
         Ok(stats)
     }
 
     #[cfg(test)]
-    fn grouping_of(&self, path: &str) -> Result<Option<crate::grouping::Grouping>> {
+    fn grouping_of(&self, path: &str) -> Option<crate::grouping::Grouping> {
         let row = self
             .conn
             .query_row(
@@ -289,12 +323,12 @@ impl Db {
                     ))
                 },
             )
-            .optional()?;
-        Ok(row.map(|(kind, volume, vibe)| crate::grouping::Grouping {
+            .ok();
+        row.map(|(kind, volume, vibe)| crate::grouping::Grouping {
             kind: kind.and_then(|value| serde_json::from_value(value.into()).ok()),
             volume: volume.and_then(|value| serde_json::from_value(value.into()).ok()),
             vibe: vibe.and_then(|value| serde_json::from_value(value.into()).ok()),
-        }))
+        })
     }
 }
 
@@ -308,7 +342,7 @@ fn serde_variant<T: Serialize>(value: &T) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Db, DbError, FileStamp};
+    use super::{Db, DbError, FileStamp, TrackRecord};
     use crate::grouping::{Grouping, Kind, Vibe};
     use crate::tags::TrackTags;
 
@@ -325,6 +359,14 @@ mod tests {
             title: Some(title.to_owned()),
             duration_ms,
             ..TrackTags::default()
+        }
+    }
+
+    fn record(folder_id: i64, path: &str, tags: TrackTags) -> TrackRecord {
+        TrackRecord {
+            folder_id,
+            stamp: stamp(path),
+            tags,
         }
     }
 
@@ -350,11 +392,12 @@ mod tests {
     fn upsert_replaces_and_stats_sum_durations() {
         let db = Db::open_in_memory().expect("db");
         let folder = db.add_folder("/music").expect("add");
-        db.upsert_track(folder.id, &stamp("/music/a.mp3"), &tags("A", 1000))
-            .expect("upsert");
-        db.upsert_track(folder.id, &stamp("/music/b.mp3"), &tags("B", 2000))
-            .expect("upsert");
-        db.upsert_track(folder.id, &stamp("/music/a.mp3"), &tags("A2", 3000))
+        db.upsert_tracks(&[
+            record(folder.id, "/music/a.mp3", tags("A", 1000)),
+            record(folder.id, "/music/b.mp3", tags("B", 2000)),
+        ])
+        .expect("upsert");
+        db.upsert_tracks(&[record(folder.id, "/music/a.mp3", tags("A2", 3000))])
             .expect("upsert");
         let stats = db.stats().expect("stats");
         assert_eq!(stats.track_count, 2);
@@ -365,13 +408,14 @@ mod tests {
     fn file_stamps_and_removal() {
         let db = Db::open_in_memory().expect("db");
         let folder = db.add_folder("/music").expect("add");
-        db.upsert_track(folder.id, &stamp("/music/a.mp3"), &tags("A", 1))
+        db.upsert_tracks(&[record(folder.id, "/music/a.mp3", tags("A", 1))])
             .expect("upsert");
         assert_eq!(
             db.file_stamps(folder.id).expect("stamps"),
             vec![stamp("/music/a.mp3")]
         );
-        db.remove_track("/music/a.mp3").expect("remove");
+        db.remove_tracks(&["/music/a.mp3".to_owned()])
+            .expect("remove");
         assert!(db.file_stamps(folder.id).expect("stamps").is_empty());
     }
 
@@ -379,7 +423,7 @@ mod tests {
     fn removing_a_folder_removes_its_tracks() {
         let db = Db::open_in_memory().expect("db");
         let folder = db.add_folder("/music").expect("add");
-        db.upsert_track(folder.id, &stamp("/music/a.mp3"), &tags("A", 1))
+        db.upsert_tracks(&[record(folder.id, "/music/a.mp3", tags("A", 1))])
             .expect("upsert");
         db.remove_folder(folder.id).expect("remove");
         assert_eq!(db.stats().expect("stats").track_count, 0);
@@ -400,12 +444,30 @@ mod tests {
             grouping_raw: Some("Instru / / Dark".to_owned()),
             ..TrackTags::default()
         };
-        db.upsert_track(folder.id, &stamp("/music/a.mp3"), &track)
+        db.upsert_tracks(&[record(folder.id, "/music/a.mp3", track)])
             .expect("upsert");
-        assert_eq!(
-            db.grouping_of("/music/a.mp3").expect("query"),
-            Some(grouping)
-        );
+        assert_eq!(db.grouping_of("/music/a.mp3"), Some(grouping));
+    }
+
+    #[test]
+    fn tracks_of_a_removed_folder_are_skipped_not_fatal() {
+        let db = Db::open_in_memory().expect("db");
+        let folder = db.add_folder("/music").expect("add");
+        db.remove_folder(folder.id).expect("remove");
+        db.upsert_tracks(&[record(folder.id, "/music/a.mp3", tags("A", 1))])
+            .expect("upsert must not fail on a vanished folder");
+        assert_eq!(db.stats().expect("stats").track_count, 0);
+    }
+
+    #[test]
+    fn refuses_a_database_from_a_newer_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("library.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open");
+            conn.pragma_update(None, "user_version", 99).expect("stamp");
+        }
+        assert!(matches!(Db::open(&path), Err(DbError::SchemaTooNew(99))));
     }
 
     #[test]

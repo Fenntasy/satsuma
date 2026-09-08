@@ -20,6 +20,20 @@ suite =
             , test "zero" <|
                 \_ -> Library.formatDuration 0 |> Expect.equal "0:00"
             ]
+        , describe "scan summary"
+            [ test "lists only the non-zero counts" <|
+                \_ ->
+                    finishedText { added = 2, updated = 0, removed = 1, failed = 0, unreachable = 0 }
+                        |> Expect.equal "Scan finished: 2 added, 1 removed"
+            , test "mentions unreachable folders" <|
+                \_ ->
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 1, unreachable = 2 }
+                        |> Expect.equal "Scan finished: 1 unreadable, 2 folders unreachable"
+            , test "says nothing changed when every count is zero" <|
+                \_ ->
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 0 }
+                        |> Expect.equal "Scan finished: nothing changed"
+            ]
         , describe "handleInvokeResult"
             [ test "list_folders fills the folders" <|
                 \_ ->
@@ -57,10 +71,10 @@ suite =
                         |> Expect.equal (Ok (Just (Scanning { scanned = 3, total = 10, path = "/music/a.mp3" })))
             , test "finished report" <|
                 \_ ->
-                    json "{\"status\":\"finished\",\"added\":1,\"updated\":2,\"removed\":3,\"failed\":0}"
+                    json "{\"status\":\"finished\",\"added\":1,\"updated\":2,\"removed\":3,\"failed\":0,\"unreachable\":1}"
                         |> Result.map (\value -> Library.handleEvent "library://scan-finished" value model)
                         |> Result.map (Maybe.map (Tuple.first >> .scan))
-                        |> Expect.equal (Ok (Just (Finished { added = 1, updated = 2, removed = 3, failed = 0 })))
+                        |> Expect.equal (Ok (Just (Finished { added = 1, updated = 2, removed = 3, failed = 0, unreachable = 1 })))
             , test "failed scan" <|
                 \_ ->
                     json "{\"status\":\"failed\",\"message\":\"disk on fire\"}"
@@ -78,6 +92,11 @@ suite =
 model : Library.Model
 model =
     Tuple.first Library.init
+
+
+finishedText : Library.Report -> String
+finishedText =
+    Library.reportText
 
 
 json : String -> Result Decode.Error Decode.Value
