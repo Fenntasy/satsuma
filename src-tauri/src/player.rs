@@ -102,6 +102,9 @@ pub fn run(
             log::error!("no audio output ({err}); playback is disabled");
             let state = State {
                 error: Some(err),
+                // Not the `Default` zero: the slider would read 0% and
+                // suggest a second problem that does not exist.
+                volume: 1.0,
                 ..State::default()
             };
             on_state(state.clone());
@@ -513,6 +516,15 @@ mod tests {
         tracks: Vec<Track>,
         act: impl FnOnce(&mpsc::Sender<Command>, &mpsc::Receiver<State>),
     ) -> Option<Vec<State>> {
+        with_audio_setup(Vec::new(), tracks, act)
+    }
+
+    /// As [`with_audio`], with commands sent before playback starts.
+    fn with_audio_setup(
+        setup: Vec<Command>,
+        tracks: Vec<Track>,
+        act: impl FnOnce(&mpsc::Sender<Command>, &mpsc::Receiver<State>),
+    ) -> Option<Vec<State>> {
         let (sender, receiver) = mpsc::channel();
         let notify = sender.clone();
         let handle = super::Handle::new(sender.clone());
@@ -533,6 +545,9 @@ mod tests {
             return None;
         }
 
+        for command in setup {
+            sender.send(command).expect("send");
+        }
         sender
             .send(Command::Play { tracks, start: 0 })
             .expect("send");
@@ -646,16 +661,20 @@ mod tests {
             album: None,
             duration_ms: 1000,
         };
-        let played = with_audio((1..=5).map(missing).collect(), |sender, states| {
-            sender.send(Command::ReportState).expect("send");
-            let stopped = wait_for(states, Duration::from_secs(5), |state| {
-                state.status == Status::Stopped && state.error.is_some()
-            });
-            assert!(
-                stopped.is_some(),
-                "a queue where nothing can be played must stop and say why"
-            );
-        });
+        let played = with_audio_setup(
+            vec![Command::SetRepeat(Repeat::Queue)],
+            (1..=5).map(missing).collect(),
+            |sender, states| {
+                sender.send(Command::ReportState).expect("send");
+                let stopped = wait_for(states, Duration::from_secs(5), |state| {
+                    state.status == Status::Stopped && state.error.is_some()
+                });
+                assert!(
+                    stopped.is_some(),
+                    "a queue that repeats and can play nothing must still stop"
+                );
+            },
+        );
         if played.is_none() {
             eprintln!("skipped: this machine has no audio output");
         }

@@ -158,7 +158,9 @@ impl Queue {
             self.stop_after_current = false;
             return Advance::Stop;
         }
-        if self.repeat == Repeat::Track {
+        // A track queued to play next comes before repeating this one,
+        // otherwise it would never get its turn.
+        if self.repeat == Repeat::Track && self.queued.is_empty() {
             return match self.current() {
                 Some(track) => Advance::Play(Box::new(track.clone())),
                 None => Advance::Stop,
@@ -340,6 +342,19 @@ mod tests {
             playing(&queue.skip_forward()),
             Some(2),
             "asking for the next track ignores repeat track"
+        );
+    }
+
+    #[test]
+    fn a_queued_track_plays_even_when_repeating_the_current_one() {
+        let mut queue = queue_of(3);
+        queue.set_repeat(Repeat::Track);
+        queue.play_next(2);
+        assert_eq!(playing(&queue.advance()), Some(3), "the queued track");
+        assert_eq!(
+            playing(&queue.advance()),
+            Some(3),
+            "then repeat track applies again, to the track now playing"
         );
     }
 

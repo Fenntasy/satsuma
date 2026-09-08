@@ -160,6 +160,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   padding: 0 16px;
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
@@ -314,10 +315,6 @@ body {
 
 .button.is-primary:hover:not(:disabled) {
   filter: brightness(1.07);
-}
-
-.player-bar {
-  gap: 16px;
 }
 
 .player {

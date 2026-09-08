@@ -75,6 +75,9 @@ type alias Model =
     -- While the user drags the seek bar, the backend position is ignored so
     -- the handle does not jump back under the pointer.
     , seeking : Maybe Int
+
+    -- The position asked for, kept until the backend reports it.
+    , seekRequested : Maybe Int
     }
 
 
@@ -94,7 +97,7 @@ emptyState =
 
 init : ( Model, Cmd Msg )
 init =
-    ( { state = emptyState, error = Nothing, seeking = Nothing }
+    ( { state = emptyState, error = Nothing, seeking = Nothing, seekRequested = Nothing }
     , Ports.send (Invoke "player_state" (Encode.object []))
     )
 
@@ -142,7 +145,9 @@ update msg model =
             ( { model | seeking = Just positionMs }, Cmd.none )
 
         SeekTo positionMs ->
-            ( { model | seeking = Nothing }
+            -- The preview stays until the backend reports a position that
+            -- has caught up, otherwise the handle snaps back for one tick.
+            ( { model | seeking = Just positionMs, seekRequested = Just positionMs }
             , command "player_seek" [ ( "positionMs", Encode.int positionMs ) ]
             )
 
@@ -215,7 +220,10 @@ handleInvokeResult command_ outcome model =
         Just
             (case outcome of
                 Ok _ ->
-                    ( { model | error = Nothing }, Cmd.none )
+                    -- Commands only queue work, so a reply says nothing
+                    -- about playback: a failure reported by the state event
+                    -- must survive it.
+                    ( model, Cmd.none )
 
                 Err error ->
                     ( { model | error = Just error }, Cmd.none )
@@ -236,6 +244,7 @@ handleEvent name payload model =
                     -- The backend reports playback failures in the state,
                     -- e.g. a file that moved since it was scanned.
                     { model | state = state, error = state.error }
+                        |> settleSeek state
 
                 Err error ->
                     { model | error = Just (Decode.errorToString error) }
@@ -244,6 +253,23 @@ handleEvent name payload model =
 
     else
         Nothing
+
+
+{-| Drops the previewed seek position once the backend has caught up with
+the position that was asked for.
+-}
+settleSeek : State -> Model -> Model
+settleSeek state model =
+    case model.seekRequested of
+        Just requested ->
+            if state.positionMs >= requested || state.status == Stopped then
+                { model | seeking = Nothing, seekRequested = Nothing }
+
+            else
+                model
+
+        Nothing ->
+            model
 
 
 
