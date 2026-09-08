@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
@@ -24,9 +24,11 @@ pub struct ScanReport {
     pub added: u64,
     pub updated: u64,
     pub removed: u64,
+    /// Audio files whose tags could not be read.
     pub failed: u64,
-    /// Folders whose root could not be read, and which were therefore left
-    /// untouched instead of having their tracks pruned.
+    /// Folders that could not be read, or that came back empty while the
+    /// cache holds tracks for them. They are left untouched instead of
+    /// having their tracks pruned.
     pub unreachable: u64,
 }
 
@@ -54,54 +56,11 @@ pub fn scan(
 ) -> Result<ScanReport, DbError> {
     let folders = with_db(db, Db::list_folders)?;
     let mut report = ScanReport::default();
-
-    let mut files: Vec<(i64, FileStamp)> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut scanned_folders: Vec<&Folder> = Vec::new();
-    // Only folders we could read completely may have their tracks pruned:
-    // a permission error or an I/O hiccup must not empty the cache.
-    let mut prunable: HashSet<i64> = HashSet::new();
-    for folder in &folders {
-        let root = Path::new(&folder.path);
-        if !root.is_dir() {
-            log::warn!("skipping unreachable folder: {}", folder.path);
-            report.unreachable += 1;
-            continue;
-        }
-        scanned_folders.push(folder);
-        let walk = audio_files(root);
-        if walk.errors == 0 {
-            prunable.insert(folder.id);
-        } else {
-            log::warn!(
-                "{} paths under {} could not be read; keeping their cached tracks",
-                walk.errors,
-                folder.path
-            );
-            report.failed += walk.errors;
-        }
-        for file in walk.files {
-            // A file can be reached through two folders when one is nested
-            // inside the other, or through a symlink. Keep the first.
-            if seen.insert(file.key) {
-                files.push((folder.id, file.stamp));
-            }
-        }
-    }
-    let total = files.len() as u64;
-
-    let mut known: HashMap<String, (i64, FileStamp)> = HashMap::new();
-    with_db(db, |db| {
-        for folder in &scanned_folders {
-            for stamp in db.file_stamps(folder.id)? {
-                known.insert(stamp.path.clone(), (folder.id, stamp));
-            }
-        }
-        Ok(())
-    })?;
-
+    let found = collect_files(&folders, &mut report);
+    let total = found.files.len() as u64;
+    let mut known = load_known(db, &found, &mut report)?;
     let mut pending: Vec<TrackRecord> = Vec::new();
-    for (index, (folder_id, stamp)) in files.into_iter().enumerate() {
+    for (index, (folder_id, stamp)) in found.files.into_iter().enumerate() {
         let path = stamp.path.clone();
         match known.remove(&stamp.path) {
             Some((_, previous)) if previous == stamp => {}
@@ -140,7 +99,7 @@ pub fn scan(
 
     let gone: Vec<String> = known
         .into_iter()
-        .filter(|(_, (folder_id, _))| prunable.contains(folder_id))
+        .filter(|(_, (folder_id, _))| found.prunable.contains(folder_id))
         .map(|(path, _)| path)
         .collect();
     if !gone.is_empty() {
@@ -150,8 +109,94 @@ pub fn scan(
     Ok(report)
 }
 
+/// What walking the library folders found.
+struct Found<'a> {
+    files: Vec<(i64, FileStamp)>,
+    /// Folders that were read completely and are therefore safe to prune.
+    prunable: HashSet<i64>,
+    /// Folders that exist but hold no audio file. Whether they are safe to
+    /// prune depends on what the cache holds for them.
+    empty: HashSet<i64>,
+    scanned: Vec<&'a Folder>,
+}
+
+fn collect_files<'a>(folders: &'a [Folder], report: &mut ScanReport) -> Found<'a> {
+    let mut found = Found {
+        files: Vec::new(),
+        prunable: HashSet::new(),
+        empty: HashSet::new(),
+        scanned: Vec::new(),
+    };
+    let mut seen: HashSet<String> = HashSet::new();
+    for folder in folders {
+        let root = Path::new(&folder.path);
+        if !root.is_dir() {
+            log::warn!("skipping unreachable folder: {}", folder.path);
+            report.unreachable += 1;
+            continue;
+        }
+        found.scanned.push(folder);
+        let walk = audio_files(root);
+        if walk.unreadable_dirs > 0 {
+            log::warn!(
+                "{} directories under {} could not be read; keeping their cached tracks",
+                walk.unreadable_dirs,
+                folder.path
+            );
+            report.unreachable += 1;
+        } else if walk.files.is_empty() {
+            // A mountpoint whose share is not mounted is an existing, empty
+            // directory, and emptying the cache for it would look exactly
+            // like a genuine deletion.
+            found.empty.insert(folder.id);
+        } else {
+            found.prunable.insert(folder.id);
+        }
+        for file in walk.files {
+            // A file can be reached through two folders when one is nested
+            // inside the other, or through a symlink. Keep the first.
+            if seen.insert(file.key) {
+                found.files.push((folder.id, file.stamp));
+            }
+        }
+    }
+    found
+}
+
+/// Loads what the cache holds for the folders that were walked, and decides
+/// whether an empty folder is empty on purpose or waiting for its drive.
+fn load_known(
+    db: &Mutex<Db>,
+    found: &Found<'_>,
+    report: &mut ScanReport,
+) -> Result<HashMap<String, (i64, FileStamp)>, DbError> {
+    let mut known = HashMap::new();
+    with_db(db, |db| {
+        for folder in &found.scanned {
+            let stamps = db.file_stamps(folder.id)?;
+            // An empty folder with an empty cache has nothing to prune, so
+            // only the case where tracks are cached needs reporting.
+            if found.empty.contains(&folder.id) && !stamps.is_empty() {
+                log::warn!(
+                    "{} holds no audio file but {} are cached; keeping them",
+                    folder.path,
+                    stamps.len()
+                );
+                report.unreachable += 1;
+            }
+            for stamp in stamps {
+                known.insert(stamp.path.clone(), (folder.id, stamp));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(known)
+}
+
+/// Runs `f` against the library cache, recovering a poisoned lock the same
+/// way [`crate::commands::AppState`] does.
 fn with_db<T>(db: &Mutex<Db>, f: impl FnOnce(&Db) -> Result<T, DbError>) -> Result<T, DbError> {
-    let db = db.lock().map_err(|_| DbError::Poisoned)?;
+    let db = db.lock().unwrap_or_else(PoisonError::into_inner);
     f(&db)
 }
 
@@ -164,24 +209,26 @@ struct FoundFile {
     key: String,
 }
 
-/// The audio files found under a folder, and how many paths could not be
-/// read while walking it.
+/// The audio files found under a folder.
 struct FolderWalk {
     files: Vec<FoundFile>,
-    errors: u64,
+    /// Directories that could not be listed. A file that vanished between
+    /// being listed and being stat'ed is not counted: that only means it is
+    /// gone, which pruning handles.
+    unreadable_dirs: u64,
 }
 
 fn audio_files(root: &Path) -> FolderWalk {
     let mut walk = FolderWalk {
         files: Vec::new(),
-        errors: 0,
+        unreadable_dirs: 0,
     };
     for entry in WalkDir::new(root).follow_links(true) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => {
                 log::warn!("cannot read directory entry: {err}");
-                walk.errors += 1;
+                walk.unreadable_dirs += 1;
                 continue;
             }
         };
@@ -191,8 +238,8 @@ fn audio_files(root: &Path) -> FolderWalk {
         if let Some(stamp) = stamp_of(&entry) {
             walk.files.push(stamp);
         } else {
+            // The file went away between being listed and being read.
             log::warn!("cannot stat {}", entry.path().display());
-            walk.errors += 1;
         }
     }
     walk
@@ -316,6 +363,7 @@ mod tests {
         assert_eq!(track_count(&db), 1, "the cached track must survive");
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_subdirectory_keeps_its_tracks() {
         use std::os::unix::fs::PermissionsExt;
@@ -330,6 +378,11 @@ mod tests {
 
         // The subdirectory becomes unreadable (permissions, I/O error).
         fs::set_permissions(&sub, fs::Permissions::from_mode(0o000)).expect("chmod");
+        // Permissions do not apply to root, where this cannot be simulated.
+        if fs::read_dir(&sub).is_ok() {
+            fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).expect("restore");
+            return;
+        }
         let (report, _) = scan_all(&db);
         fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).expect("restore");
 
@@ -337,7 +390,8 @@ mod tests {
             report.removed, 0,
             "an unreadable subtree must not be pruned"
         );
-        assert!(report.failed >= 1);
+        assert_eq!(report.unreachable, 1, "the folder must be flagged");
+        assert_eq!(report.failed, 0, "no audio file was unreadable");
         assert_eq!(track_count(&db), 2, "cached tracks must survive");
     }
 
@@ -362,6 +416,7 @@ mod tests {
         assert_eq!(report, ScanReport::default());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_file_reached_through_a_symlinked_folder_is_scanned_once() {
         let (dir, db) = setup();
@@ -374,6 +429,33 @@ mod tests {
         assert_eq!(report.added, 1, "the same file must not be added twice");
         assert_eq!(track_count(&db), 1);
 
+        let (report, _) = scan_all(&db);
+        assert_eq!(report, ScanReport::default());
+    }
+
+    #[test]
+    fn an_empty_folder_that_used_to_hold_tracks_keeps_them() {
+        let (dir, db) = setup();
+        fs::copy(FIXTURE, dir.path().join("song.mp3")).expect("copy");
+        let (report, _) = scan_all(&db);
+        assert_eq!(report.added, 1);
+
+        // The mountpoint is still there, but the share is not mounted.
+        fs::remove_file(dir.path().join("song.mp3")).expect("remove");
+        let (report, _) = scan_all(&db);
+        assert_eq!(
+            report,
+            ScanReport {
+                unreachable: 1,
+                ..ScanReport::default()
+            }
+        );
+        assert_eq!(track_count(&db), 1, "cached tracks must survive");
+    }
+
+    #[test]
+    fn an_empty_folder_with_an_empty_cache_is_not_reported() {
+        let (_dir, db) = setup();
         let (report, _) = scan_all(&db);
         assert_eq!(report, ScanReport::default());
     }

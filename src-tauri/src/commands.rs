@@ -76,8 +76,12 @@ impl AppState {
         }
     }
 
+    /// Runs `f` against the library cache. A poisoned lock is recovered: a
+    /// panic under the lock leaves the connection usable (rusqlite rolls a
+    /// transaction back when it is dropped), and refusing to touch it would
+    /// disable the library for the rest of the session.
     fn with_db<T>(&self, f: impl FnOnce(&Db) -> crate::db::Result<T>) -> Result<T, String> {
-        let db = self.db.lock().map_err(|_| "database lock poisoned")?;
+        let db = self.db.lock().unwrap_or_else(PoisonError::into_inner);
         f(&db).map_err(|err| err.to_string())
     }
 }

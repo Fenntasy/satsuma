@@ -47,8 +47,6 @@ pub enum DbError {
     Sqlite(#[from] rusqlite::Error),
     #[error("folder already in the library: {0}")]
     DuplicateFolder(String),
-    #[error("the database is locked by a thread that crashed")]
-    Poisoned,
     #[error("the library was created by a newer version of Satsuma (schema {0})")]
     SchemaTooNew(i64),
 }
@@ -279,7 +277,7 @@ impl Db {
         {
             let mut stmt = transaction.prepare_cached(UPSERT_TRACK)?;
             for track in tracks {
-                let grouping = track.tags.grouping.unwrap_or_default();
+                let (kind, volume, vibe) = track.tags.grouping.unwrap_or_default().stored_names();
                 stmt.execute(params![
                     track.folder_id,
                     track.stamp.path,
@@ -296,9 +294,9 @@ impl Db {
                     i64::try_from(track.tags.duration_ms).unwrap_or(i64::MAX),
                     track.tags.rating,
                     track.tags.grouping_raw,
-                    grouping.kind.map(|kind| serde_variant(&kind)),
-                    grouping.volume.map(|volume| serde_variant(&volume)),
-                    grouping.vibe.map(|vibe| serde_variant(&vibe)),
+                    kind,
+                    volume,
+                    vibe,
                     track.tags.has_embedded_cover,
                 ])?;
             }
@@ -382,14 +380,6 @@ fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
     name.into()
-}
-
-/// The lowercase serde name of a unit enum variant, as stored in the DB.
-fn serde_variant<T: Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -103,6 +103,33 @@ impl Vibe {
 }
 
 impl Grouping {
+    /// The three parts as the lowercase names used to store them.
+    #[must_use]
+    pub fn stored_names(
+        &self,
+    ) -> (
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<&'static str>,
+    ) {
+        (
+            self.kind.map(|kind| match kind {
+                Kind::Chant => "chant",
+                Kind::Instru => "instru",
+            }),
+            self.volume.map(|volume| match volume {
+                Volume::Soft => "soft",
+                Volume::Loud => "loud",
+            }),
+            self.vibe.map(|vibe| match vibe {
+                Vibe::Happy => "happy",
+                Vibe::Sad => "sad",
+                Vibe::Dark => "dark",
+                Vibe::Mix => "mix",
+            }),
+        )
+    }
+
     /// Parses a grouping tag. Returns `None` when the text does not follow
     /// the `A / B / C` format or uses unknown values. Surrounding whitespace
     /// around each part is ignored; a blank string is the empty grouping.
@@ -220,6 +247,13 @@ mod tests {
         for (value, expected) in cases {
             assert_eq!(value.to_string(), expected);
         }
+    }
+
+    #[test]
+    fn stored_names_are_the_lowercase_labels() {
+        let value = grouping(Some(Kind::Instru), None, Some(Vibe::Dark));
+        assert_eq!(value.stored_names(), (Some("instru"), None, Some("dark")));
+        assert_eq!(Grouping::default().stored_names(), (None, None, None));
     }
 
     #[test]

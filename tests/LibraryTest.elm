@@ -29,6 +29,10 @@ suite =
                 \_ ->
                     finishedText { added = 0, updated = 0, removed = 0, failed = 1, unreachable = 2 }
                         |> Expect.equal "Scan finished: 1 unreadable, 2 folders unreachable"
+            , test "uses the singular for a single unreachable folder" <|
+                \_ ->
+                    finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 1 }
+                        |> Expect.equal "Scan finished: 1 folder unreachable"
             , test "says nothing changed when every count is zero" <|
                 \_ ->
                     finishedText { added = 0, updated = 0, removed = 0, failed = 0, unreachable = 0 }

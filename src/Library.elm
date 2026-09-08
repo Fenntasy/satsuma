@@ -378,7 +378,13 @@ reportText report =
                 |> counted report.updated "updated"
                 |> counted report.removed "removed"
                 |> counted report.failed "unreadable"
-                |> counted report.unreachable "folders unreachable"
+                |> counted report.unreachable
+                    (if report.unreachable == 1 then
+                        "folder unreachable"
+
+                     else
+                        "folders unreachable"
+                    )
                 |> List.reverse
                 |> String.join ", "
                 |> (\summary ->
