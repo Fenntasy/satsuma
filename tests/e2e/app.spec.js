@@ -391,8 +391,23 @@ test("clicking a track plays it", async ({ page }) => {
   await clearCalls(page);
 
   await page.getByRole("button", { name: "1. One" }).click();
+  // The rest of the album follows it, rather than the queue holding one
+  // track and stopping.
   await expect.poll(() => calls(page)).toEqual([
-    { command: "play_tracks", args: { ids: [1] } },
+    { command: "play_tracks", args: { ids: [1, 2], startId: 1 } },
+  ]);
+});
+
+test("choosing the second track plays the album from there", async ({ page }) => {
+  await open(page);
+  await page.getByRole("button", { name: "Indie" }).click();
+  await page.getByRole("button", { name: "Alpha" }).click();
+  await page.getByRole("button", { name: "First" }).click();
+  await clearCalls(page);
+
+  await page.getByRole("button", { name: "2. Two" }).click();
+  await expect.poll(() => calls(page)).toEqual([
+    { command: "play_tracks", args: { ids: [1, 2], startId: 2 } },
   ]);
 });
 
@@ -405,8 +420,8 @@ test("double-clicking a track plays it once, not three times", async ({ page }) 
 
   await page.getByRole("button", { name: "1. One" }).dblclick();
   await expect.poll(() => calls(page)).toEqual([
-    { command: "play_tracks", args: { ids: [1] } },
-    { command: "play_tracks", args: { ids: [1] } },
+    { command: "play_tracks", args: { ids: [1, 2], startId: 1 } },
+    { command: "play_tracks", args: { ids: [1, 2], startId: 1 } },
   ]);
 });
 
@@ -416,7 +431,7 @@ test("double-clicking a branch plays everything under it", async ({ page }) => {
   await page.getByRole("button", { name: "Indie" }).dblclick();
   await expect.poll(() => calls(page)).toContainEqual({
     command: "play_tracks",
-    args: { ids: [1, 2] },
+    args: { ids: [1, 2], startId: null },
   });
 });
 

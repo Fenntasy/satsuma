@@ -129,7 +129,7 @@ type Msg
     | PlayLibrary
     | EnqueueLibrary
     | Toggle String
-    | Play (List Int)
+    | Play (List Int) (Maybe Int)
     | Enqueue (List Int)
     | SetFilter String
     | SetGrouping Grouping
@@ -158,8 +158,19 @@ update msg model =
         Toggle path ->
             ( { model | expanded = toggle path model.expanded }, Cmd.none )
 
-        Play ids ->
-            ( model, tracksCommand "play_tracks" ids )
+        Play ids startId ->
+            ( model
+            , Ports.send
+                (Invoke "play_tracks"
+                    (Encode.object
+                        [ ( "ids", Encode.list Encode.int ids )
+                        , ( "startId"
+                          , Maybe.map Encode.int startId |> Maybe.withDefault Encode.null
+                          )
+                        ]
+                    )
+                )
+            )
 
         Enqueue ids ->
             ( model, tracksCommand "enqueue_tracks" ids )
@@ -549,7 +560,7 @@ viewTreeFor rows grouping filter expanded =
             p [ class "muted" ] [ text (emptyTreeText rows) ]
 
           else
-            ul [ class "tree" ] (List.map (viewNode expanded) nodes)
+            ul [ class "tree" ] (List.map (viewNode expanded []) nodes)
         ]
 
 
@@ -579,8 +590,11 @@ groupingFromLabel label =
         |> Maybe.withDefault GenreArtistAlbum
 
 
-viewNode : Set String -> Tree.Node -> Html Msg
-viewNode expanded node =
+{-| `siblings` is what the enclosing branch holds, so choosing a track plays
+the rest of its album after it rather than that track alone.
+-}
+viewNode : Set String -> List Int -> Tree.Node -> Html Msg
+viewNode expanded siblings node =
     let
         isOpen : Bool
         isOpen =
@@ -636,11 +650,11 @@ viewNode expanded node =
                             Track ->
                                 -- One click plays it, so a double click
                                 -- must not restart it twice over.
-                                [ onClick (Play ids) ]
+                                [ onClick (Play (queueFor siblings ids) (List.head ids)) ]
 
                             Branches _ ->
                                 [ onClick (Toggle node.path)
-                                , onDoubleClick (Play ids)
+                                , onDoubleClick (Play ids Nothing)
                                 ]
                        )
                 )
@@ -657,7 +671,7 @@ viewNode expanded node =
         , case node.children of
             Branches children ->
                 if isOpen then
-                    ul [ class "tree" ] (List.map (viewNode expanded) children)
+                    ul [ class "tree" ] (List.map (viewNode expanded node.ids) children)
 
                 else
                     text ""
@@ -665,6 +679,18 @@ viewNode expanded node =
             Track ->
                 text ""
         ]
+
+
+{-| What to queue when a track is chosen: its siblings when it has any, so
+the album carries on, and otherwise the track itself.
+-}
+queueFor : List Int -> List Int -> List Int
+queueFor siblings ids =
+    if List.isEmpty siblings then
+        ids
+
+    else
+        siblings
 
 
 viewCount : Tree.Node -> Html Msg
