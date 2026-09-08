@@ -29,13 +29,13 @@ function playerState(overrides = {}) {
 /**
  * Loads the app against the stubbed host, with a library already scanned.
  */
-async function open(page, { folders = FOLDERS, stats = STATS } = {}) {
+async function open(page) {
   // Seeded before the page loads, so the commands Elm sends on startup get
   // real answers rather than null.
   await page.addInitScript(installTauriStub, {
     ping: "satsuma test",
-    list_folders: folders,
-    library_stats: stats,
+    list_folders: FOLDERS,
+    library_stats: STATS,
   });
   await page.goto("/");
   await expect(page.getByText("3 tracks")).toBeVisible();
@@ -271,6 +271,57 @@ test("a failure that is not a string is still readable", async ({ page }) => {
   );
   await page.getByRole("button", { name: "Play all" }).click();
   await expect(page.getByText('{"kind":"no device"}')).toBeVisible();
+});
+
+test("a finished scan is reported and the library asked for again", async ({
+  page,
+}) => {
+  await open(page);
+  await page.evaluate(() => {
+    window.__SATSUMA_TEST__.reply("library_stats", {
+      track_count: 5,
+      total_duration_ms: 60000,
+    });
+    window.__SATSUMA_TEST__.clearCalls();
+  });
+
+  await emit(page, "library://scan-finished", {
+    status: "finished",
+    added: 2,
+    updated: 0,
+    removed: 1,
+    failed: 0,
+    unreachable: 0,
+    emptied: 0,
+  });
+
+  await expect(page.getByText("Scan finished: 2 added, 1 removed")).toBeVisible();
+  // The panel must ask for the library again, or it would keep showing the
+  // counts from before the scan.
+  await expect(page.getByText("5 tracks · 1:00")).toBeVisible();
+  await expect
+    .poll(async () => (await calls(page)).map((call) => call.command))
+    .toContain("library_stats");
+});
+
+test("Rescan asks the backend to scan again", async ({ page }) => {
+  await open(page);
+  // Rescan stays disabled until the scan that runs at startup reports back.
+  await expect(page.getByRole("button", { name: "Rescan" })).toBeDisabled();
+  await emit(page, "library://scan-finished", {
+    status: "finished",
+    added: 0,
+    updated: 0,
+    removed: 0,
+    failed: 0,
+    unreachable: 0,
+    emptied: 0,
+  });
+  await clearCalls(page);
+  await page.getByRole("button", { name: "Rescan" }).click();
+  await expect
+    .poll(async () => (await calls(page)).map((call) => call.command))
+    .toEqual(["start_scan"]);
 });
 
 test("scan progress is shown while a scan runs", async ({ page }) => {

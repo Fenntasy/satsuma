@@ -41,6 +41,9 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
 
 ## Testing the frontend
 
+`pnpm test:e2e` needs a browser: run `pnpm exec playwright install chromium`
+once after cloning, or `pnpm check` fails on the end-to-end step.
+
 `tests/e2e` drives the real frontend in a browser through Playwright, with
 `tests/e2e/tauri-stub.js` standing in for the Tauri host: it implements
 `invoke` and the event callbacks, so the page runs unchanged. Use it to

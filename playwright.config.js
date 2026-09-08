@@ -1,6 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const PORT = 1421;
+// Not 1420 (the app's dev server) nor 1421, which Vite reserves for the
+// hot-reload socket when developing against a device.
+const PORT = 1430;
 
 export default defineConfig({
   testDir: "./tests/e2e",

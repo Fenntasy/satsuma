@@ -39,7 +39,9 @@ function describeError(error) {
     return error;
   }
   try {
-    return JSON.stringify(error);
+    // `JSON.stringify` answers `undefined` rather than throwing for some
+    // values, and the port needs a string.
+    return JSON.stringify(error) ?? String(error);
   } catch {
     return String(error);
   }

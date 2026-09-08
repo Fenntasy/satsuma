@@ -43,6 +43,7 @@ export function installTauriStub(seed = {}) {
         return Promise.resolve(nextCallbackId++);
       }
       if (command === "plugin:event|unlisten") {
+        listeners.delete(args?.event);
         return Promise.resolve();
       }
 
@@ -54,6 +55,13 @@ export function installTauriStub(seed = {}) {
       }
       const reply = replies.get(command);
       return Promise.resolve(reply === undefined ? null : reply);
+    },
+  };
+
+  // `@tauri-apps/api` calls this before it invokes `unlisten`.
+  window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+    unregisterListener(event) {
+      listeners.delete(event);
     },
   };
 
