@@ -164,10 +164,10 @@ pub fn start_scan(app: AppHandle, state: State<'_, AppState>) {
     if !lock_status(&scan).claim() {
         return;
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        let guard = ScanGuard::new(app.clone(), scan);
-        run_scan(&app, guard);
-    });
+    // Built before spawning: if the task is never run, dropping it still
+    // releases the slot and tells the frontend.
+    let guard = ScanGuard::new(app.clone(), scan);
+    tauri::async_runtime::spawn_blocking(move || run_scan(&app, guard));
 }
 
 /// Releases the scan slot and tells the frontend if the scan thread dies
@@ -206,18 +206,22 @@ impl Drop for ScanGuard {
 fn run_scan(app: &AppHandle, mut guard: ScanGuard) {
     let state = app.state::<AppState>();
     loop {
-        scan_once(app, &state);
+        let outcome = scan_once(app, &state);
         // Decide whether to run again while still holding the lock, so a
         // request that arrives now is either seen here or starts its own
         // scan afterwards, never dropped in between.
         if !lock_status(&guard.scan).finish_pass() {
+            // Only the last pass is reported: telling the frontend a scan
+            // finished while another pass is starting would make the panel
+            // flip between finished and scanning.
+            emit(app, SCAN_FINISHED_EVENT, &outcome);
             guard.handed_over = true;
             return;
         }
     }
 }
 
-fn scan_once(app: &AppHandle, state: &State<'_, AppState>) {
+fn scan_once(app: &AppHandle, state: &State<'_, AppState>) -> ScanOutcome {
     let mut last_emit: Option<Instant> = None;
     let result = scanner::scan(&state.db, |progress: ScanProgress| {
         let done = progress.scanned == progress.total;
@@ -225,11 +229,12 @@ fn scan_once(app: &AppHandle, state: &State<'_, AppState>) {
             last_emit = Some(Instant::now());
             emit(app, SCAN_PROGRESS_EVENT, &progress);
         }
-    })
-    .map_err(|err| err.to_string());
+    });
     match result {
-        Ok(report) => emit(app, SCAN_FINISHED_EVENT, &ScanOutcome::Finished(report)),
-        Err(message) => emit(app, SCAN_FINISHED_EVENT, &ScanOutcome::Failed { message }),
+        Ok(report) => ScanOutcome::Finished(report),
+        Err(err) => ScanOutcome::Failed {
+            message: err.to_string(),
+        },
     }
 }
 

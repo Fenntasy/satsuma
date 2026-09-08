@@ -377,13 +377,25 @@ fn set_aside(path: &Path) -> Result<()> {
         .map_or(0, |since| since.as_secs());
     // A crash loop can reach this twice within the same second, and renaming
     // over the previous copy would destroy what it is kept for.
-    let mut backup = with_suffix(path, &format!(".unusable-{stamp}"));
-    for attempt in 1..1000 {
-        if !backup.exists() {
+    let mut backup = None;
+    for attempt in 0..1000 {
+        let candidate = if attempt == 0 {
+            with_suffix(path, &format!(".unusable-{stamp}"))
+        } else {
+            with_suffix(path, &format!(".unusable-{stamp}-{attempt}"))
+        };
+        if !candidate.exists() {
+            backup = Some(candidate);
             break;
         }
-        backup = with_suffix(path, &format!(".unusable-{stamp}-{attempt}"));
     }
+    let Some(backup) = backup else {
+        log::error!("no free name to set {} aside", path.display());
+        return Err(DbError::CannotSetAside(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "too many unusable library caches are already kept",
+        )));
+    };
     for suffix in ["", "-wal", "-shm"] {
         let from = with_suffix(path, suffix);
         if from.exists() {
