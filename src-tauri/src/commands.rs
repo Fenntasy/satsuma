@@ -16,9 +16,6 @@ use crate::settings;
 pub const SCAN_PROGRESS_EVENT: &str = "library://scan-progress";
 pub const SCAN_FINISHED_EVENT: &str = "library://scan-finished";
 pub const PLAYER_STATE_EVENT: &str = "player://state";
-/// How many tracks "play the library" queues at most, so an accidental
-/// click does not build a queue of every track ever scanned.
-const PLAY_ALL_LIMIT: u32 = 10_000;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Whether a scan is running, and whether another one was asked for while
@@ -284,7 +281,7 @@ fn scan_once(app: &AppHandle, state: &State<'_, AppState>) -> ScanOutcome {
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn play_library(state: State<'_, AppState>) -> Result<(), String> {
-    let tracks = state.with_db(|db| db.list_tracks(Some(PLAY_ALL_LIMIT)))?;
+    let tracks = state.with_db(|db| db.list_tracks(None))?;
     if tracks.is_empty() {
         return Err("the library is empty; scan a folder first".to_owned());
     }

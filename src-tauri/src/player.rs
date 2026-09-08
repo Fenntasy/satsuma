@@ -20,6 +20,10 @@ use crate::queue::{Advance, Queue, Repeat};
 /// How often the thread reports where it is when playing.
 const TICK: Duration = Duration::from_millis(200);
 
+/// How many unplayable tracks in a row are skipped before giving up, so a
+/// queue whose files all moved stops instead of racing to its end.
+const MAX_SKIPS: usize = 20;
+
 /// What the frontend can ask the player to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -72,7 +76,6 @@ pub struct State {
     pub repeat: Repeat,
     pub stop_after_current: bool,
     pub queue_length: usize,
-    pub queue_index: Option<usize>,
     /// Set when the last command could not be carried out, e.g. a file that
     /// disappeared since it was scanned.
     pub error: Option<String>,
@@ -252,34 +255,47 @@ impl Player {
         }
     }
 
+    /// Starts `track`, moving on to the next one when it cannot be played:
+    /// one file that moved since the scan must not end the session.
     fn start(&mut self, track: Option<&Track>) {
-        let Some(track) = track else {
-            self.stop();
-            return;
-        };
-        self.sink.clear();
-        self.generation += 1;
-        match decode(Path::new(&track.path)) {
-            Ok(source) => {
-                self.duration = source.total_duration();
-                self.sink.append(source);
-                // A zero-length source right after the track tells us it
-                // ended, which is immediate where polling would leave a gap.
-                let notify = self.notify.clone();
-                let generation = self.generation;
-                self.sink.append(EmptyCallback::new(Box::new(move || {
-                    let _ = notify.send(Command::TrackFinished(generation));
-                })));
-                self.sink.play();
-                self.status = Status::Playing;
-            }
-            Err(err) => {
-                log::warn!("cannot play {}: {err}", track.path);
-                self.error = Some(err);
-                self.status = Status::Stopped;
-                self.duration = None;
+        let mut next = track.cloned();
+        for _ in 0..MAX_SKIPS {
+            let Some(track) = next else {
+                self.stop();
+                return;
+            };
+            match self.try_start(&track) {
+                Ok(()) => return,
+                Err(err) => {
+                    log::warn!("skipping {}: {err}", track.path);
+                    self.error = Some(err);
+                    next = match self.queue.skip_forward() {
+                        Advance::Play(track) => Some(*track),
+                        Advance::Stop => None,
+                    };
+                }
             }
         }
+        log::warn!("giving up after {MAX_SKIPS} tracks that could not be played");
+        self.stop();
+    }
+
+    fn try_start(&mut self, track: &Track) -> Result<(), String> {
+        self.sink.clear();
+        self.generation += 1;
+        let source = decode(Path::new(&track.path))?;
+        self.duration = source.total_duration();
+        self.sink.append(source);
+        // A zero-length source right after the track tells us it ended,
+        // which is immediate where polling would leave a gap.
+        let notify = self.notify.clone();
+        let generation = self.generation;
+        self.sink.append(EmptyCallback::new(Box::new(move || {
+            let _ = notify.send(Command::TrackFinished(generation));
+        })));
+        self.sink.play();
+        self.status = Status::Playing;
+        Ok(())
     }
 
     fn play_pause(&mut self) {
@@ -348,7 +364,6 @@ impl Player {
             repeat: self.queue.repeat(),
             stop_after_current: self.queue.stop_after_current(),
             queue_length: self.queue.len(),
-            queue_index: self.queue.current_index(),
             error: self.error.clone(),
         }
     }
@@ -585,6 +600,61 @@ mod tests {
             })
             .expect("stopping must take effect");
             assert_eq!(stopped.track, None, "nothing plays once stopped");
+        });
+        if played.is_none() {
+            eprintln!("skipped: this machine has no audio output");
+        }
+    }
+
+    #[test]
+    fn an_unplayable_track_is_skipped_rather_than_ending_the_session() {
+        let missing = Track {
+            id: 9,
+            path: "/definitely/missing.mp3".to_owned(),
+            title: Some("Missing".to_owned()),
+            artist: None,
+            album: None,
+            duration_ms: 1000,
+        };
+        let played = with_audio(vec![missing, fixture(2)], |_sender, states| {
+            let playing = wait_for(states, Duration::from_secs(5), |state| {
+                state.status == Status::Playing
+            })
+            .expect("the next playable track must start");
+            assert_eq!(
+                playing.track.as_ref().map(|track| track.id),
+                Some(2),
+                "the file that cannot be read is skipped"
+            );
+            assert!(
+                playing.error.is_some(),
+                "the skipped file is still reported"
+            );
+        });
+        if played.is_none() {
+            eprintln!("skipped: this machine has no audio output");
+        }
+    }
+
+    #[test]
+    fn a_queue_of_unplayable_tracks_stops_instead_of_spinning() {
+        let missing = |id: i64| Track {
+            id,
+            path: format!("/definitely/missing{id}.mp3"),
+            title: None,
+            artist: None,
+            album: None,
+            duration_ms: 1000,
+        };
+        let played = with_audio((1..=5).map(missing).collect(), |sender, states| {
+            sender.send(Command::ReportState).expect("send");
+            let stopped = wait_for(states, Duration::from_secs(5), |state| {
+                state.status == Status::Stopped && state.error.is_some()
+            });
+            assert!(
+                stopped.is_some(),
+                "a queue where nothing can be played must stop and say why"
+            );
         });
         if played.is_none() {
             eprintln!("skipped: this machine has no audio output");

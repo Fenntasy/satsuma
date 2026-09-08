@@ -139,7 +139,6 @@ playingJson =
     , "repeat": "queue"
     , "stop_after_current": false
     , "queue_length": 13
-    , "queue_index": 2
     , "error": null
     }
     """
@@ -161,7 +160,6 @@ errorJson message =
     , "repeat": "off"
     , "stop_after_current": false
     , "queue_length": 0
-    , "queue_index": null
     , "error": \"""" ++ message ++ """"
     }
     """
@@ -178,7 +176,6 @@ stateJson status repeat =
     , "repeat": \"""" ++ repeat ++ """"
     , "stop_after_current": false
     , "queue_length": 0
-    , "queue_index": null
     , "error": null
     }
     """

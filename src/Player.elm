@@ -360,8 +360,12 @@ view model =
                 , onInput (String.toInt >> Maybe.withDefault 0 >> SeekPreview)
 
                 -- `change` fires for the keyboard too, unlike `mouseup`,
-                -- and always ends the drag.
-                , Html.Events.on "change" (Decode.succeed (SeekTo position))
+                -- and always ends the drag. The value comes from the event
+                -- because the view may not have been re-rendered yet.
+                , Html.Events.on "change"
+                    (Html.Events.targetValue
+                        |> Decode.map (String.toInt >> Maybe.withDefault 0 >> SeekTo)
+                    )
                 ]
                 []
             , span [ class "player-time" ] [ text (formatPosition duration) ]

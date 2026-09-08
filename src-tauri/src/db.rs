@@ -623,6 +623,25 @@ mod tests {
             .collect();
         assert_eq!(titles, ["A", "B", "C"]);
         assert_eq!(db.list_tracks(Some(2)).expect("list").len(), 2);
+
+        // A track with no artist sorts after the ones that have any.
+        db.upsert_tracks(&[TrackRecord {
+            folder_id: folder.id,
+            stamp: stamp("/music/d.mp3"),
+            tags: TrackTags {
+                title: Some("D".to_owned()),
+                duration_ms: 1000,
+                ..TrackTags::default()
+            },
+        }])
+        .expect("upsert");
+        let titles: Vec<String> = db
+            .list_tracks(None)
+            .expect("list")
+            .into_iter()
+            .filter_map(|track| track.title)
+            .collect();
+        assert_eq!(titles, ["A", "B", "C", "D"]);
     }
 
     #[test]

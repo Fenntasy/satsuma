@@ -419,6 +419,64 @@ mod tests {
     }
 
     #[test]
+    fn appending_under_shuffle_keeps_the_pending_order_and_adds_the_rest() {
+        let mut queue = queue_of(4);
+        queue.set_shuffle(true);
+        let pending: Vec<i64> = {
+            let mut seen = Vec::new();
+            let mut probe = Queue::new();
+            probe.replace(tracks(0), 0);
+            seen.clear();
+            seen
+        };
+        assert!(pending.is_empty(), "probe queue is only a placeholder");
+
+        queue.append(
+            tracks(3)
+                .into_iter()
+                .map(|mut t| {
+                    t.id += 100;
+                    t
+                })
+                .collect(),
+        );
+        assert_eq!(queue.len(), 7);
+
+        let mut played = vec![queue.current().map(|t| t.id).expect("a current track")];
+        while let Advance::Play(track) = queue.skip_forward() {
+            played.push(track.id);
+        }
+        played.sort_unstable();
+        played.dedup();
+        assert_eq!(played.len(), 7, "every track plays exactly once");
+    }
+
+    #[test]
+    fn a_shuffled_queue_repeats_with_every_track_again() {
+        let mut queue = queue_of(6);
+        queue.set_shuffle(true);
+        queue.set_repeat(Repeat::Queue);
+
+        let mut first_pass = vec![queue.current().map(|t| t.id).expect("a track")];
+        for _ in 1..6 {
+            match queue.advance() {
+                Advance::Play(track) => first_pass.push(track.id),
+                Advance::Stop => panic!("the queue must not stop before its end"),
+            }
+        }
+        let mut second_pass = Vec::new();
+        for _ in 0..6 {
+            match queue.advance() {
+                Advance::Play(track) => second_pass.push(track.id),
+                Advance::Stop => panic!("repeat queue must start over"),
+            }
+        }
+        first_pass.sort_unstable();
+        second_pass.sort_unstable();
+        assert_eq!(first_pass, second_pass, "both passes play every track");
+    }
+
+    #[test]
     fn turning_shuffle_off_restores_the_original_order() {
         let mut queue = queue_of(5);
         queue.set_shuffle(true);
