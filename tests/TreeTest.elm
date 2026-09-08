@@ -34,6 +34,34 @@ suite =
                         |> childrenOf "First"
                         |> labels
                         |> Expect.equal [ "1. One", "2. Two" ]
+            , test "an album keeps its track order whatever the grouping" <|
+                \_ ->
+                    -- The database sorts by artist before track, so an
+                    -- album whose tracks name different artists comes back
+                    -- out of order unless the tree sorts it again.
+                    let
+                        split : List Tree.Row
+                        split =
+                            [ row 2 "Indie" "Alpha" "Split" "Second" (Just 2)
+                            , row 1 "Indie" "Zed" "Split" "First" (Just 1)
+                            ]
+                    in
+                    Tree.build AlbumOnly "" split
+                        |> childrenOf "Split"
+                        |> labels
+                        |> Expect.equal [ "1. First", "2. Second" ]
+            , test "the ids of a branch follow the order it shows" <|
+                \_ ->
+                    let
+                        split : List Tree.Row
+                        split =
+                            [ row 2 "Indie" "Alpha" "Split" "Second" (Just 2)
+                            , row 1 "Indie" "Zed" "Split" "First" (Just 1)
+                            ]
+                    in
+                    Tree.build AlbumOnly "" split
+                        |> List.concatMap .ids
+                        |> Expect.equal [ 1, 2 ]
             , test "grouping by album only skips the levels above" <|
                 \_ ->
                     Tree.build AlbumOnly "" library

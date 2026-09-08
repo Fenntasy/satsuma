@@ -119,6 +119,13 @@ groupingKey grouping =
             "album"
 
 
+{-| A number as a string that sorts the way the number does.
+-}
+sortable : Maybe Int -> String
+sortable value =
+    String.padLeft 6 '0' (String.fromInt (Maybe.withDefault 0 value))
+
+
 {-| Separates the parts of a path. A tag can contain a slash, so the
 separator has to be something a tag cannot hold.
 -}
@@ -139,8 +146,12 @@ sortFor grouping rows =
     let
         key : Row -> List String
         key row =
-            levels grouping
-                |> List.map (\level -> String.toLower (Maybe.withDefault unknown (level row)))
+            List.map (\level -> String.toLower (Maybe.withDefault unknown (level row)))
+                (levels grouping)
+                -- Then disc, track and title, so an album keeps its order
+                -- whichever levels the grouping happens to use.
+                ++ [ sortable row.discNumber, sortable row.trackNumber ]
+                ++ [ String.toLower (Maybe.withDefault "" row.title) ]
     in
     -- The key is built once per row rather than once per comparison: it
     -- lowercases up to three fields and allocates a list.
