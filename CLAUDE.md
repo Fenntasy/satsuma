@@ -29,6 +29,13 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
 - Library data flow: `scanner.rs` walks folders and skips unchanged files by
   mtime+size, `tags.rs` reads metadata with lofty, `db.rs` is the SQLite
   cache. Scan progress reaches Elm as Tauri events forwarded by `bridge.js`.
+- Playback: `queue.rs` is pure logic (shuffle, repeat, stop-after, queued
+  tracks) and carries the tests; `player.rs` owns the audio device on its own
+  thread and answers commands sent over a channel. Nothing else touches
+  rodio. Player state reaches Elm as `player://state` events.
+- rodio 0.22 renamed its types: `Player` is the old `Sink`, `MixerDeviceSink`
+  the old `OutputStream`. Decode with `Decoder::try_from(File)`, which is the
+  only constructor that supports seeking.
 - UI language: English only.
 - No "various artists" / compilation grouping in the library, ever.
 
@@ -49,7 +56,8 @@ with ffmpeg) and write tags into temp copies of it.
 
 - One GitHub issue per feature; branch `type/<issue>-<slug>`; PR body uses
   `Fixes #N`.
-- Roborev runs in auto mode here: fix findings and loop until only low
-  severity remains, then commit, push, wait for CI and squash merge.
+- Roborev runs in auto mode here, see `.claude/rules/roborev-loop.md`: fix
+  what is worth fixing, re-review only while findings above low remain, then
+  commit, push, wait for CI and squash merge.
 - Never mention Claude, AI or LLMs in commits, PR titles/bodies or branch
   names.

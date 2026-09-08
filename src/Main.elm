@@ -8,6 +8,7 @@ import Html.Events exposing (onClick)
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Library
+import Player
 import Ports
 import Theme exposing (Mode(..), Setting(..))
 
@@ -44,6 +45,7 @@ type alias Model =
     , panel : Panel
     , backend : BackendStatus
     , library : Library.Model
+    , player : Player.Model
     }
 
 
@@ -58,6 +60,9 @@ init flags =
     let
         ( library, libraryCmd ) =
             Library.init
+
+        ( player, playerCmd ) =
+            Player.init
     in
     ( { theme =
             flags.theme
@@ -67,10 +72,12 @@ init flags =
       , panel = Library
       , backend = Connecting
       , library = library
+      , player = player
       }
     , Cmd.batch
         [ Ports.send (Invoke "ping" (Encode.object []))
         , Cmd.map LibraryMsg libraryCmd
+        , Cmd.map PlayerMsg playerCmd
         ]
     )
 
@@ -83,6 +90,7 @@ type Msg
     = SelectPanel Panel
     | CycleTheme
     | LibraryMsg Library.Msg
+    | PlayerMsg Player.Msg
     | FromJs (Result Decode.Error Incoming)
 
 
@@ -104,13 +112,22 @@ update msg model =
             Library.update libraryMsg model.library
                 |> updateLibrary model
 
+        PlayerMsg playerMsg ->
+            Player.update playerMsg model.player
+                |> updatePlayer model
+
         FromJs (Ok (SystemTheme dark)) ->
             ( { model | systemDark = dark }, Cmd.none )
 
         FromJs (Ok (Event name payload)) ->
-            Library.handleEvent name payload model.library
-                |> Maybe.map (updateLibrary model)
-                |> Maybe.withDefault ( model, Cmd.none )
+            case Library.handleEvent name payload model.library of
+                Just result ->
+                    updateLibrary model result
+
+                Nothing ->
+                    Player.handleEvent name payload model.player
+                        |> Maybe.map (updatePlayer model)
+                        |> Maybe.withDefault ( model, Cmd.none )
 
         FromJs (Ok (InvokeResult "ping" (Ok payload))) ->
             ( { model
@@ -126,9 +143,14 @@ update msg model =
             ( { model | backend = Unreachable error }, Cmd.none )
 
         FromJs (Ok (InvokeResult command outcome)) ->
-            Library.handleInvokeResult command outcome model.library
-                |> Maybe.map (updateLibrary model)
-                |> Maybe.withDefault ( model, Cmd.none )
+            case Library.handleInvokeResult command outcome model.library of
+                Just result ->
+                    updateLibrary model result
+
+                Nothing ->
+                    Player.handleInvokeResult command outcome model.player
+                        |> Maybe.map (updatePlayer model)
+                        |> Maybe.withDefault ( model, Cmd.none )
 
         FromJs (Err error) ->
             ( { model | backend = Unreachable (Decode.errorToString error) }, Cmd.none )
@@ -137,6 +159,11 @@ update msg model =
 updateLibrary : Model -> ( Library.Model, Cmd Library.Msg ) -> ( Model, Cmd Msg )
 updateLibrary model ( library, cmd ) =
     ( { model | library = library }, Cmd.map LibraryMsg cmd )
+
+
+updatePlayer : Model -> ( Player.Model, Cmd Player.Msg ) -> ( Model, Cmd Msg )
+updatePlayer model ( player, cmd ) =
+    ( { model | player = player }, Cmd.map PlayerMsg cmd )
 
 
 subscriptions : Model -> Sub Msg
@@ -230,14 +257,17 @@ viewMain =
 viewPlayerBar : Model -> Html Msg
 viewPlayerBar model =
     div [ class "player-bar" ]
-        [ span [ class "status" ] [ text (backendText model.backend) ]
-        , button
-            [ type_ "button"
-            , class "theme-button"
-            , title "Switch theme"
-            , onClick CycleTheme
+        [ Html.map PlayerMsg (Player.view model.player)
+        , div [ class "player-bar-end" ]
+            [ span [ class "status" ] [ text (backendText model.backend) ]
+            , button
+                [ type_ "button"
+                , class "theme-button"
+                , title "Switch theme"
+                , onClick CycleTheme
+                ]
+                [ text ("Theme: " ++ Theme.label model.theme) ]
             ]
-            [ text ("Theme: " ++ Theme.label model.theme) ]
         ]
 
 

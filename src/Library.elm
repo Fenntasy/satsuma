@@ -25,6 +25,7 @@ import Html.Attributes as Attr exposing (class, disabled, title, type_, value)
 import Html.Events exposing (onClick)
 import Json.Decode as Decode exposing (Decoder)
 import Json.Encode as Encode
+import Player
 import Ports
 
 
@@ -110,6 +111,8 @@ type Msg
     = PickFolder
     | RemoveFolder Int
     | StartScan
+    | PlayLibrary
+    | EnqueueLibrary
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -125,6 +128,12 @@ update msg model =
 
         StartScan ->
             ( { model | scan = Requested }, startScan )
+
+        PlayLibrary ->
+            ( model, Player.playLibrary )
+
+        EnqueueLibrary ->
+            ( model, Player.enqueueLibrary )
 
 
 {-| Handles the reply of a command this panel issued. Returns `Nothing` when
@@ -287,7 +296,22 @@ view model =
         , h2 [] [ text "Folders" ]
         , viewFolders model.folders
         , div [ class "library-actions" ]
-            [ button [ type_ "button", class "button", onClick PickFolder ] [ text "Add folder" ]
+            [ button
+                [ type_ "button"
+                , class "button is-primary"
+                , onClick PlayLibrary
+                , disabled (model.stats.trackCount == 0)
+                ]
+                [ text "Play all" ]
+            , button
+                [ type_ "button"
+                , class "button"
+                , onClick EnqueueLibrary
+                , disabled (model.stats.trackCount == 0)
+                , title "Add every track to the end of the queue"
+                ]
+                [ text "Queue all" ]
+            , button [ type_ "button", class "button", onClick PickFolder ] [ text "Add folder" ]
             , button
                 [ type_ "button"
                 , class "button"

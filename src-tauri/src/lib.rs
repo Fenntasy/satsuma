@@ -3,11 +3,15 @@
 pub mod commands;
 pub mod db;
 pub mod grouping;
+pub mod player;
+pub mod queue;
 pub mod scanner;
 pub mod settings;
 pub mod tags;
 
-use tauri::Manager;
+use std::sync::mpsc;
+
+use tauri::{Emitter, Manager};
 
 use commands::AppState;
 
@@ -36,6 +40,27 @@ fn restore_folders(db: &db::Db, settings_path: &std::path::Path) {
     }
 }
 
+/// Starts the thread that owns the audio output and returns the handle used
+/// to talk to it. Its state updates are forwarded to the frontend.
+fn start_player(app: &tauri::AppHandle) -> player::Handle {
+    let (sender, receiver) = mpsc::channel();
+    let notify = sender.clone();
+    let handle = player::Handle::new(sender);
+    let alive = handle.liveness();
+    let app = app.clone();
+    std::thread::Builder::new()
+        .name("satsuma-player".to_owned())
+        .spawn(move || {
+            player::run(&receiver, &notify, &alive, |state| {
+                if let Err(err) = app.emit(commands::PLAYER_STATE_EVENT, &state) {
+                    log::warn!("cannot report the player state: {err}");
+                }
+            });
+        })
+        .expect("cannot start the player thread");
+    handle
+}
+
 /// Builds and runs the Tauri application.
 ///
 /// # Panics
@@ -62,7 +87,7 @@ pub fn run() {
             let db = db::Db::open_or_recreate(&data_dir.join("library.sqlite"))?;
             let settings_path = data_dir.join(settings::FILE_NAME);
             restore_folders(&db, &settings_path);
-            app.manage(AppState::new(db, settings_path));
+            app.manage(AppState::new(db, settings_path, start_player(app.handle())));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -73,6 +98,20 @@ pub fn run() {
             commands::library_stats,
             commands::pick_folder,
             commands::start_scan,
+            commands::play_library,
+            commands::player_state,
+            commands::player_play_pause,
+            commands::player_stop,
+            commands::player_next,
+            commands::player_previous,
+            commands::player_seek,
+            commands::player_set_volume,
+            commands::player_set_shuffle,
+            commands::player_set_repeat,
+            commands::player_set_stop_after_current,
+            commands::player_play_next,
+            commands::player_jump_to,
+            commands::enqueue_library,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Satsuma");

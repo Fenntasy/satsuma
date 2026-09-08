@@ -1,19 +1,21 @@
 //! Tauri commands exposed to the frontend.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use std::path::PathBuf;
-
 use crate::db::{Db, Folder, LibraryStats};
+use crate::player::{self, Handle};
+use crate::queue::Repeat;
 use crate::scanner::{self, ScanProgress, ScanReport};
 use crate::settings;
 
 pub const SCAN_PROGRESS_EVENT: &str = "library://scan-progress";
 pub const SCAN_FINISHED_EVENT: &str = "library://scan-finished";
+pub const PLAYER_STATE_EVENT: &str = "player://state";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Whether a scan is running, and whether another one was asked for while
@@ -69,15 +71,17 @@ pub struct AppState {
     pub db: Mutex<Db>,
     scan: Arc<Mutex<ScanStatus>>,
     settings_path: PathBuf,
+    player: Handle,
 }
 
 impl AppState {
     #[must_use]
-    pub fn new(db: Db, settings_path: PathBuf) -> Self {
+    pub fn new(db: Db, settings_path: PathBuf, player: Handle) -> Self {
         AppState {
             db: Mutex::new(db),
             scan: Arc::new(Mutex::new(ScanStatus::default())),
             settings_path,
+            player,
         }
     }
 
@@ -265,6 +269,165 @@ fn scan_once(app: &AppHandle, state: &State<'_, AppState>) -> ScanOutcome {
             message: err.to_string(),
         },
     }
+}
+
+// PLAYER
+
+/// Queues every track in the library and starts playing.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read or the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn play_library(state: State<'_, AppState>) -> Result<(), String> {
+    let tracks = state.with_db(|db| db.list_tracks(None))?;
+    if tracks.is_empty() {
+        return Err("the library is empty; scan a folder first".to_owned());
+    }
+    state.player.send(player::Command::Play {
+        tracks,
+        start: None,
+    })
+}
+
+/// Asks the player to report where it is, e.g. when the window opens.
+///
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_state(state: State<'_, AppState>) -> Result<(), String> {
+    state.player.send(player::Command::ReportState)
+}
+
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_play_pause(state: State<'_, AppState>) -> Result<(), String> {
+    state.player.send(player::Command::PlayPause)
+}
+
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_stop(state: State<'_, AppState>) -> Result<(), String> {
+    state.player.send(player::Command::Stop)
+}
+
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_next(state: State<'_, AppState>) -> Result<(), String> {
+    state.player.send(player::Command::Next)
+}
+
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_previous(state: State<'_, AppState>) -> Result<(), String> {
+    state.player.send(player::Command::Previous)
+}
+
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_seek(state: State<'_, AppState>, position_ms: u64) -> Result<(), String> {
+    state
+        .player
+        .send(player::Command::Seek(Duration::from_millis(position_ms)))
+}
+
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), String> {
+    state.player.send(player::Command::SetVolume(volume))
+}
+
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_set_shuffle(state: State<'_, AppState>, shuffle: bool) -> Result<(), String> {
+    state.player.send(player::Command::SetShuffle(shuffle))
+}
+
+/// # Errors
+///
+/// Returns a message when the repeat mode is unknown or the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_set_repeat(state: State<'_, AppState>, repeat: String) -> Result<(), String> {
+    let repeat = match repeat.as_str() {
+        "off" => Repeat::Off,
+        "track" => Repeat::Track,
+        "queue" => Repeat::Queue,
+        other => return Err(format!("unknown repeat mode: {other}")),
+    };
+    state.player.send(player::Command::SetRepeat(repeat))
+}
+
+/// Queues a track of the current queue to play right after the current one.
+///
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_play_next(state: State<'_, AppState>, index: usize) -> Result<(), String> {
+    state.player.send(player::Command::PlayNext(index))
+}
+
+/// Plays the track at `index` in the current queue now.
+///
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_jump_to(state: State<'_, AppState>, index: usize) -> Result<(), String> {
+    state.player.send(player::Command::JumpTo(index))
+}
+
+/// Adds every track of the library to the end of the queue.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read or the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn enqueue_library(state: State<'_, AppState>) -> Result<(), String> {
+    let tracks = state.with_db(|db| db.list_tracks(None))?;
+    if tracks.is_empty() {
+        return Err("the library is empty; scan a folder first".to_owned());
+    }
+    state.player.send(player::Command::Enqueue(tracks))
+}
+
+/// # Errors
+///
+/// Returns a message when the player stopped.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn player_set_stop_after_current(state: State<'_, AppState>, stop: bool) -> Result<(), String> {
+    state
+        .player
+        .send(player::Command::SetStopAfterCurrent(stop))
 }
 
 #[derive(Clone, serde::Serialize)]

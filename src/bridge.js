@@ -1,7 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-const FORWARDED_EVENTS = ["library://scan-progress", "library://scan-finished"];
+const FORWARDED_EVENTS = [
+  "library://scan-progress",
+  "library://scan-finished",
+  "player://state",
+];
 
 const THEME_KEY = "satsuma.theme";
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
