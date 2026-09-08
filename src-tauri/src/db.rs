@@ -75,6 +75,18 @@ pub struct TrackRecord {
     pub tags: TrackTags,
 }
 
+/// A track as the player needs it: enough to play it and to show what is
+/// playing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Track {
+    pub id: i64,
+    pub path: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: u64,
+}
+
 /// A file as recorded by the last scan, used to skip unchanged files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileStamp {
@@ -319,6 +331,36 @@ impl Db {
         Ok(())
     }
 
+    /// Lists tracks in the order a library is usually played: by artist,
+    /// then album, then disc and track number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on query failure.
+    pub fn list_tracks(&self, limit: Option<u32>) -> Result<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, title, artist, album, duration_ms
+             FROM tracks
+             ORDER BY artist IS NULL, artist, album IS NULL, album,
+                      disc_number, track_number, title
+             LIMIT ?1",
+        )?;
+        let limit = limit.map_or(-1, i64::from);
+        let tracks = stmt
+            .query_map([limit], |row| {
+                Ok(Track {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    title: row.get(2)?,
+                    artist: row.get(3)?,
+                    album: row.get(4)?,
+                    duration_ms: row.get::<_, i64>(5)?.try_into().unwrap_or(0),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(tracks)
+    }
+
     /// # Errors
     ///
     /// Returns an error on query failure.
@@ -548,6 +590,39 @@ mod tests {
         db.remove_folder(folder.id).expect("remove");
         assert_eq!(db.stats().expect("stats").track_count, 0);
         assert!(db.list_folders().expect("list").is_empty());
+    }
+
+    #[test]
+    fn tracks_are_listed_by_artist_then_album_then_track() {
+        let db = Db::open_in_memory().expect("db");
+        let folder = db.add_folder("/music").expect("add");
+        let entry = |path: &str, artist: &str, album: &str, number: u32, title: &str| TrackRecord {
+            folder_id: folder.id,
+            stamp: stamp(path),
+            tags: TrackTags {
+                title: Some(title.to_owned()),
+                artist: Some(artist.to_owned()),
+                album: Some(album.to_owned()),
+                track_number: Some(number),
+                duration_ms: 1000,
+                ..TrackTags::default()
+            },
+        };
+        db.upsert_tracks(&[
+            entry("/music/c.mp3", "Beta", "Second", 1, "C"),
+            entry("/music/b.mp3", "Alpha", "First", 2, "B"),
+            entry("/music/a.mp3", "Alpha", "First", 1, "A"),
+        ])
+        .expect("upsert");
+
+        let titles: Vec<String> = db
+            .list_tracks(None)
+            .expect("list")
+            .into_iter()
+            .filter_map(|track| track.title)
+            .collect();
+        assert_eq!(titles, ["A", "B", "C"]);
+        assert_eq!(db.list_tracks(Some(2)).expect("list").len(), 2);
     }
 
     #[test]

@@ -29,6 +29,13 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
 - Library data flow: `scanner.rs` walks folders and skips unchanged files by
   mtime+size, `tags.rs` reads metadata with lofty, `db.rs` is the SQLite
   cache. Scan progress reaches Elm as Tauri events forwarded by `bridge.js`.
+- Playback: `queue.rs` is pure logic (shuffle, repeat, stop-after, queued
+  tracks) and carries the tests; `player.rs` owns the audio device on its own
+  thread and answers commands sent over a channel. Nothing else touches
+  rodio. Player state reaches Elm as `player://state` events.
+- rodio 0.22 renamed its types: `Player` is the old `Sink`, `MixerDeviceSink`
+  the old `OutputStream`. Decode with `Decoder::try_from(File)`, which is the
+  only constructor that supports seeking.
 - UI language: English only.
 - No "various artists" / compilation grouping in the library, ever.
 

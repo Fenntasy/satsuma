@@ -2,7 +2,7 @@
   --font-sans: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   --radius: 8px;
   --sidebar-width: 280px;
-  --player-height: 72px;
+  --player-height: 84px;
 }
 
 .app[data-theme="light"] {
@@ -166,6 +166,10 @@ body {
 }
 
 .status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--fg-muted);
 }
 
@@ -277,12 +281,14 @@ body {
 
 .library-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
 }
 
 .button {
   padding: 6px 12px;
+  white-space: nowrap;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-elevated);
@@ -298,4 +304,128 @@ body {
 .button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.button.is-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.button.is-primary:hover:not(:disabled) {
+  filter: brightness(1.07);
+}
+
+.player-bar {
+  gap: 16px;
+}
+
+.player {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.player-track {
+  flex: 0 1 220px;
+  min-width: 110px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.now-playing {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.now-playing-title,
+.now-playing-artist {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.now-playing-artist {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.player-transport {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.player-button {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.player-button:hover {
+  background: var(--bg-elevated);
+}
+
+.player-button.is-active {
+  color: var(--accent);
+}
+
+.player-seek {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 120px;
+}
+
+.player-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.seek {
+  flex: 1;
+  min-width: 0;
+}
+
+.player-volume {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.volume {
+  width: 90px;
+}
+
+input[type="range"] {
+  accent-color: var(--accent);
+}
+
+.player .error {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-bar-end {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 1 auto;
+  min-width: 0;
 }
