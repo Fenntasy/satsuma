@@ -35,6 +35,11 @@ suite =
                     decode "{\"tag\":\"invokeResult\",\"command\":\"ping\",\"ok\":false,\"error\":\"boom\"}"
                         |> Result.map (mapPayload (Decode.decodeValue Decode.string))
                         |> Expect.equal (Ok (Just ( "ping", Err "boom" )))
+            , test "forwarded event" <|
+                \_ ->
+                    decode "{\"tag\":\"event\",\"name\":\"library://scan-finished\",\"payload\":{\"added\":1}}"
+                        |> Result.map eventName
+                        |> Expect.equal (Ok (Just "library://scan-finished"))
             , test "system theme change" <|
                 \_ ->
                     decode "{\"tag\":\"systemTheme\",\"dark\":true}"
@@ -60,5 +65,15 @@ mapPayload f incoming =
         InvokeResult command outcome ->
             Just ( command, Result.map f outcome )
 
-        SystemTheme _ ->
+        _ ->
+            Nothing
+
+
+eventName : Incoming -> Maybe String
+eventName incoming =
+    case incoming of
+        Event name _ ->
+            Just name
+
+        _ ->
             Nothing

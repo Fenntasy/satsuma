@@ -4,7 +4,7 @@ module Bridge exposing (Incoming(..), Outgoing(..), decodeIncoming, encodeOutgoi
 
 Every message is a JSON object with a `tag` field. Outgoing `Invoke` messages
 call a Tauri command; the JS side answers with an `InvokeResult` carrying the
-same command name.
+same command name. Tauri events are forwarded as `Event` messages.
 
 -}
 
@@ -19,6 +19,7 @@ type Outgoing
 
 type Incoming
     = InvokeResult String (Result String Decode.Value)
+    | Event String Decode.Value
     | SystemTheme Bool
 
 
@@ -54,6 +55,11 @@ incomingDecoder =
                         Decode.map2 InvokeResult
                             (Decode.field "command" Decode.string)
                             invokeOutcomeDecoder
+
+                    "event" ->
+                        Decode.map2 Event
+                            (Decode.field "name" Decode.string)
+                            (Decode.field "payload" Decode.value)
 
                     "systemTheme" ->
                         Decode.map SystemTheme (Decode.field "dark" Decode.bool)

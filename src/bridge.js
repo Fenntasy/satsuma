@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
+const FORWARDED_EVENTS = ["library://scan-progress", "library://scan-finished"];
 
 const THEME_KEY = "satsuma.theme";
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -51,6 +54,12 @@ export function start(Elm, node) {
   darkQuery.addEventListener("change", (event) => {
     app.ports.fromJs.send({ tag: "systemTheme", dark: event.matches });
   });
+
+  for (const name of FORWARDED_EVENTS) {
+    listen(name, (event) => {
+      app.ports.fromJs.send({ tag: "event", name, payload: event.payload });
+    }).catch((error) => console.warn("[bridge] cannot listen to", name, error));
+  }
 
   return app;
 }

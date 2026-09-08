@@ -1,6 +1,14 @@
 //! Satsuma desktop backend.
 
-mod commands;
+pub mod commands;
+pub mod db;
+pub mod grouping;
+pub mod scanner;
+pub mod tags;
+
+use tauri::Manager;
+
+use commands::AppState;
 
 /// Builds and runs the Tauri application.
 ///
@@ -10,7 +18,23 @@ mod commands;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![commands::ping])
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+            let db = db::Db::open(&data_dir.join("library.sqlite"))?;
+            app.manage(AppState::new(db));
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::ping,
+            commands::list_folders,
+            commands::add_folder,
+            commands::remove_folder,
+            commands::library_stats,
+            commands::pick_folder,
+            commands::start_scan,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Satsuma");
 }
