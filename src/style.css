@@ -95,8 +95,11 @@ body {
 }
 
 .sidebar-content {
+  display: flex;
   flex: 1;
-  overflow: auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
   padding: 16px;
 }
 
@@ -425,4 +428,121 @@ input[type="range"] {
   gap: 12px;
   flex: 0 1 auto;
   min-width: 0;
+}
+
+.tree-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The browser scrolls on its own, so opening a genre cannot push the
+   folders and the buttons out of reach. */
+.tree-panel > .tree,
+.tree-panel > .muted {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tree-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tree-filter,
+.tree-grouping {
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.tree-filter {
+  flex: 1;
+}
+
+.tree-filter:focus,
+.tree-grouping:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.tree {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tree .tree {
+  padding-left: 14px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--radius);
+}
+
+.tree-row:hover {
+  background: var(--bg-elevated);
+}
+
+.tree-twisty,
+.tree-bullet {
+  width: 18px;
+  flex: 0 0 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  line-height: 1.6;
+  text-align: center;
+  cursor: pointer;
+}
+
+.tree-bullet {
+  cursor: default;
+  font-size: 11px;
+}
+
+.tree-label {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.tree-count {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tree-add {
+  flex: 0 0 auto;
+  /* Faded rather than hidden, so it can still be reached with the keyboard. */
+  opacity: 0;
+}
+
+.tree-row:hover .tree-add,
+.tree-add:focus-visible {
+  opacity: 1;
 }
