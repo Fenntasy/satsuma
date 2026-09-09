@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use lofty::file::TaggedFileExt;
+use tauri::http::{header, HeaderValue, Response, StatusCode};
 
 use crate::db::{Db, Result as DbResult};
 
@@ -112,6 +113,74 @@ impl Key {
             }
             _ => None,
         }
+    }
+}
+
+/// How long the webview may keep a cover before asking again.
+///
+/// Long enough that playing a record fetches its cover once rather than
+/// once a track, short enough that a cover which changed because the tags
+/// were edited comes back within the hour. Editing tags is #7, and when it
+/// lands it should say so here rather than wait this out.
+const CACHE_CONTROL: &str = "max-age=3600";
+
+/// What a picture is called when its own media type cannot be trusted.
+const UNKNOWN_MEDIA_TYPE: &str = "application/octet-stream";
+
+/// Answers a request on the cover protocol.
+///
+/// The path of the URL is the key, as [`Key::encode`] wrote it. Anything
+/// that is not a key we issued, and any album with no cover, is a 404: the
+/// `img` falls back to whatever the panel put behind it, which is the same
+/// outcome and needs no special case in Elm.
+#[must_use]
+pub fn respond(db: &Db, path: &str) -> Response<Vec<u8>> {
+    let found = Key::decode(path.trim_start_matches('/')).and_then(|key| {
+        resolve(db, &key)
+            .inspect_err(|err| log::warn!("cannot look up a cover: {err}"))
+            .ok()
+            .flatten()
+    });
+    let Some(cover) = found else {
+        let mut response = Response::new(Vec::new());
+        *response.status_mut() = StatusCode::NOT_FOUND;
+        return response;
+    };
+    // Built by hand rather than with the builder, which answers a
+    // `Result` that would have to be unwrapped: there is no failure to
+    // report here, only a media type that may need replacing.
+    let mut response = Response::new(cover.bytes);
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(media_type(&cover.mime))
+            .unwrap_or(HeaderValue::from_static(UNKNOWN_MEDIA_TYPE)),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(CACHE_CONTROL),
+    );
+    response
+}
+
+/// The media type to declare for a picture.
+///
+/// A picture's media type comes out of the file's own tag, so it is
+/// whatever the person who tagged it put there. Anything that is not a
+/// plain `type/subtype` of unremarkable characters is not passed on: a
+/// value carrying a newline would let a tagged file write its own headers.
+fn media_type(mime: &str) -> &str {
+    let plausible = mime.len() < 100
+        && mime.matches('/').count() == 1
+        && !mime.starts_with('/')
+        && !mime.ends_with('/')
+        && mime
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/+-._".contains(c));
+    if plausible {
+        mime
+    } else {
+        UNKNOWN_MEDIA_TYPE
     }
 }
 
@@ -545,5 +614,90 @@ mod tests {
             cover.bytes, PNG,
             "cover beats folder whatever order the disk lists them in"
         );
+    }
+
+    // SERVING
+
+    #[test]
+    fn a_cover_is_served_with_what_it_is_and_how_long_it_keeps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = library(dir.path());
+        add(
+            &db,
+            &track_with_picture(dir.path(), "1.mp3"),
+            "Citrus",
+            true,
+        );
+
+        let response = super::respond(&db, &format!("/{}", citrus().encode()));
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert!(
+            response.headers()["cache-control"]
+                .to_str()
+                .expect("ascii")
+                .starts_with("max-age="),
+            "without this the webview asks again for every track of the record"
+        );
+        assert_eq!(response.body(), PNG);
+    }
+
+    #[test]
+    fn an_album_with_no_cover_is_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = library(dir.path());
+        add(
+            &db,
+            &track_without_picture(dir.path(), "1.mp3"),
+            "Citrus",
+            false,
+        );
+
+        let response = super::respond(&db, &format!("/{}", citrus().encode()));
+        assert_eq!(response.status(), 404);
+        assert!(response.body().is_empty());
+    }
+
+    #[test]
+    fn a_url_that_was_never_issued_is_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = library(dir.path());
+        add(
+            &db,
+            &track_with_picture(dir.path(), "1.mp3"),
+            "Citrus",
+            true,
+        );
+
+        // Including one that decodes to a real album whose key was built
+        // by hand rather than issued, which must still work, and rubbish,
+        // which must not reach the library at all.
+        for path in ["/", "/zz", "/not hex", "/414243"] {
+            let response = super::respond(&db, path);
+            assert_eq!(response.status(), 404, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_media_type_from_a_tag_cannot_write_its_own_headers() {
+        // The media type comes out of the file, so it is whatever whoever
+        // tagged it put there.
+        assert_eq!(super::media_type("image/png"), "image/png");
+        assert_eq!(super::media_type("image/svg+xml"), "image/svg+xml");
+        for hostile in [
+            "image/png\r\nX-Whatever: 1",
+            "image/png\nSet-Cookie: a=b",
+            "",
+            "image",
+            "/png",
+            "image/",
+            "image/png; charset=<script>",
+        ] {
+            assert_eq!(
+                super::media_type(hostile),
+                "application/octet-stream",
+                "{hostile:?} must not be passed on"
+            );
+        }
     }
 }

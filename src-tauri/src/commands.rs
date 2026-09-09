@@ -136,8 +136,15 @@ impl AppState {
     /// transaction back when it is dropped), and refusing to touch it would
     /// disable the library for the rest of the session.
     fn with_db<T>(&self, f: impl FnOnce(&Db) -> crate::db::Result<T>) -> Result<T, String> {
+        self.with_library(|db| f(db).map_err(|err| err.to_string()))
+    }
+
+    /// Runs `f` against the library cache, for a caller that answers for
+    /// itself rather than returning an error to the frontend. The cover
+    /// protocol is one: it has a response to send either way.
+    pub(crate) fn with_library<T>(&self, f: impl FnOnce(&Db) -> T) -> T {
         let db = self.db.lock().unwrap_or_else(PoisonError::into_inner);
-        f(&db).map_err(|err| err.to_string())
+        f(&db)
     }
 }
 
