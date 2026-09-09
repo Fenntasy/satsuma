@@ -375,7 +375,16 @@ handlePlaylistResult command outcome model =
     let
         failed : String -> ( Model, Cmd Msg )
         failed error =
-            ( { model | playlistError = Just error }, Cmd.none )
+            ( { model | playlistError = Just error }
+            , if command == "list_playlists" then
+                -- Reloading after a failed reload would never stop.
+                Cmd.none
+
+              else
+                -- A change may have been undone in the panel before the
+                -- backend refused it, and the backend is what decides.
+                listPlaylists
+            )
 
         reload : ( Model, Cmd Msg )
         reload =
@@ -386,9 +395,10 @@ handlePlaylistResult command outcome model =
             Just
                 (case Decode.decodeValue (Decode.list Playlist.decoder) payload of
                     Ok playlists ->
-                        ( resort { model | playlists = playlists, playlistError = Nothing }
-                        , Cmd.none
-                        )
+                        -- The error is left as it is: this reload may be
+                        -- the one a failed command asked for, and it must
+                        -- not wipe the message explaining the failure.
+                        ( resort { model | playlists = playlists }, Cmd.none )
 
                     Err error ->
                         failed (Decode.errorToString error)

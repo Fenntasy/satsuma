@@ -659,10 +659,49 @@ test("deleting the open tab does not show its tracks under another", async ({
   await page.getByRole("button", { name: "Second" }).click();
   await expect(page.locator(".playlist-row")).toHaveCount(2);
 
-  // The reply is held back, so this is what the user sees in between.
-  await page.evaluate(() => window.__SATSUMA_TEST__.reply("list_playlists", []));
+  // What the backend answers with once the delete lands. The rows of the
+  // playlist just deleted must never show under First, neither while the
+  // reply is in flight nor after it.
+  await page.evaluate(
+    (remaining) => window.__SATSUMA_TEST__.reply("list_playlists", remaining),
+    [{ id: 1, name: "First", tracks: [ROWS[0]] }],
+  );
   await page.getByTitle("Delete Second").click();
+  await expect(page.getByRole("button", { name: "First" })).toBeVisible();
   await expect(page.locator(".playlist-row")).toHaveCount(1);
+});
+
+test("a failed reload does not ask for another one", async ({ page }) => {
+  // Answering a failed reload with another reload would never stop.
+  await page.addInitScript(installTauriStub, { ping: "satsuma test" });
+  await page.goto("/");
+  await page.evaluate(() =>
+    window.__SATSUMA_TEST__.failWith("list_playlists", "the settings cannot be read"),
+  );
+  await clearCalls(page);
+  await page.getByTitle("New playlist").click();
+
+  await expect(page.getByText("the settings cannot be read")).toBeVisible();
+  await page.waitForTimeout(300);
+  const reloads = (await calls(page)).filter((call) => call.command === "list_playlists");
+  expect(reloads.length).toBeLessThan(3);
+});
+
+test("a playlist command that fails puts the tab back", async ({ page }) => {
+  await openWithPlaylist(page, [
+    { id: 1, name: "First", tracks: [ROWS[0]] },
+    { id: 2, name: "Second", tracks: [ROWS[1]] },
+  ]);
+  await page.getByRole("button", { name: "Second" }).click();
+  await page.evaluate(() =>
+    window.__SATSUMA_TEST__.failWith("delete_playlist", "that playlist is not there any more"),
+  );
+
+  await page.getByTitle("Delete Second").click();
+  await expect(page.getByText("that playlist is not there any more")).toBeVisible();
+  // The panel dropped the tab before asking; the backend refused, so it
+  // must come back rather than staying gone until a restart.
+  await expect(page.getByRole("button", { name: "Second" })).toBeVisible();
 });
 
 test("a playlist is deleted", async ({ page }) => {

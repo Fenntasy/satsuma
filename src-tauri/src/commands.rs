@@ -379,11 +379,16 @@ fn resolve_playlists(saved: Vec<settings::Playlist>, rows: &[LibraryRow]) -> Vec
 ///
 /// # Errors
 ///
-/// Returns a message when the settings cannot be written.
+/// Returns a message when the name is empty, or when the settings cannot
+/// be written.
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn create_playlist(state: State<'_, AppState>, name: String) -> Result<u32, String> {
-    let name = check_name(&name)?;
+    create(&state, &name)
+}
+
+fn create(state: &AppState, name: &str) -> Result<u32, String> {
+    let name = check_name(name)?;
     let mut id = 0;
     state.update_settings(|settings| {
         id = next_playlist_id(&settings.playlists);
@@ -398,11 +403,16 @@ pub fn create_playlist(state: State<'_, AppState>, name: String) -> Result<u32, 
 
 /// # Errors
 ///
-/// Returns a message when the name is empty.
+/// Returns a message when the name is empty, when no playlist has that id,
+/// or when the settings cannot be written.
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn rename_playlist(state: State<'_, AppState>, id: u32, name: String) -> Result<(), String> {
-    let name = check_name(&name)?;
+    rename(&state, id, &name)
+}
+
+fn rename(state: &AppState, id: u32, name: &str) -> Result<(), String> {
+    let name = check_name(name)?;
     let mut found = false;
     state.update_settings(|settings| {
         if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
@@ -415,10 +425,15 @@ pub fn rename_playlist(state: State<'_, AppState>, id: u32, name: String) -> Res
 
 /// # Errors
 ///
-/// Returns a message when the settings cannot be written.
+/// Returns a message when no playlist has that id, or when the settings
+/// cannot be written.
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn delete_playlist(state: State<'_, AppState>, id: u32) -> Result<(), String> {
+    delete(&state, id)
+}
+
+fn delete(state: &AppState, id: u32) -> Result<(), String> {
     let mut found = false;
     state.update_settings(|settings| {
         found = settings.playlists.iter().any(|playlist| playlist.id == id);
@@ -431,11 +446,16 @@ pub fn delete_playlist(state: State<'_, AppState>, id: u32) -> Result<(), String
 ///
 /// # Errors
 ///
-/// Returns a message when the library cannot be read.
+/// Returns a message when the library cannot be read, when no playlist has
+/// that id, or when the settings cannot be written.
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn add_to_playlist(state: State<'_, AppState>, id: u32, ids: Vec<i64>) -> Result<(), String> {
-    let tracks = state.with_db(|db| db.tracks_by_ids(&ids))?;
+    add_tracks(&state, id, &ids)
+}
+
+fn add_tracks(state: &AppState, id: u32, ids: &[i64]) -> Result<(), String> {
+    let tracks = state.with_db(|db| db.tracks_by_ids(ids))?;
     let mut found = false;
     state.update_settings(|settings| {
         if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
@@ -776,8 +796,47 @@ mod tests {
 
     #[test]
     fn a_change_to_a_playlist_that_is_gone_is_reported() {
-        assert!(super::missing_unless(true).is_ok());
-        assert!(super::missing_unless(false).is_err());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state(dir.path());
+        let id = super::create(&state, "Mine").expect("create");
+
+        super::delete(&state, id).expect("delete");
+        // Everything that changes a playlist has to notice it is gone,
+        // rather than reporting a change it did not make.
+        assert!(super::delete(&state, id).is_err());
+        assert!(super::rename(&state, id, "Other").is_err());
+        assert!(super::add_tracks(&state, id, &[1]).is_err());
+        assert!(
+            state.settings().expect("load").playlists.is_empty(),
+            "a refused change must leave the settings alone"
+        );
+    }
+
+    #[test]
+    fn a_playlist_is_created_renamed_and_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state(dir.path());
+
+        let first = super::create(&state, "  Loud  ").expect("create");
+        assert_eq!(
+            state.settings().expect("load").playlists[0].name,
+            "Loud",
+            "the name is stored without the spaces around it"
+        );
+        assert!(super::create(&state, "  ").is_err());
+
+        let second = super::create(&state, "Quiet").expect("create");
+        assert_ne!(first, second);
+
+        super::rename(&state, first, "Louder").expect("rename");
+        let playlists = state.settings().expect("load").playlists;
+        assert_eq!(playlists[0].name, "Louder");
+        assert_eq!(playlists[1].name, "Quiet", "only the one asked for");
+
+        super::delete(&state, first).expect("delete");
+        let left = state.settings().expect("load").playlists;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, second);
     }
 
     #[test]
