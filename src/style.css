@@ -123,16 +123,22 @@ body {
 
 .tabs {
   display: flex;
+  align-items: center;
   gap: 2px;
   padding: 8px 8px 0;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
+  overflow-x: auto;
 }
 
 .tab {
-  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px 4px 10px;
   border-radius: var(--radius) var(--radius) 0 0;
   color: var(--fg-muted);
+  white-space: nowrap;
 }
 
 .tab.is-active {
@@ -545,19 +551,6 @@ input[type="range"] {
 .tree-row:hover .tree-add,
 .tree-add:focus-visible {
   opacity: 1;
-}
-
-.tabs {
-  align-items: center;
-  overflow-x: auto;
-}
-
-.tab {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 6px 4px 10px;
-  white-space: nowrap;
 }
 
 .tab-label {

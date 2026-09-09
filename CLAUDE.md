@@ -14,6 +14,14 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
   devDependencies. Run commands with `mise exec --` when the shell
   is not activated.
 
+## Rules
+
+`.claude/rules/` holds what the review has caught more than once:
+`elm.md` (lazy rendering, events, replies), `rust.md` (nothing succeeds
+quietly, the file decides), `testing.md` (a test must be able to fail) and
+`roborev-loop.md` (how the review loop runs and ends). Read them before
+writing code in either language, not after a review names one of them.
+
 ## Conventions
 
 - Pin every dependency exactly: `save-exact` for npm (enforced by `.npmrc`),
