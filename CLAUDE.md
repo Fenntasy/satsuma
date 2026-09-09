@@ -24,8 +24,9 @@ them before writing code in either language, not after a review names
 something they cover.
 
 `.claude/rules/` holds only what is specific to this repository:
-`testing.md` (a test must be able to fail) and `roborev-loop.md` (how the
-review loop runs and ends).
+`workflow.md` (how an issue gets done), `review-findings.md` (what each
+kind of review finding triggers) and `testing.md` (a test must be able to
+fail).
 
 ## Conventions
 
@@ -85,8 +86,11 @@ with ffmpeg) and write tags into temp copies of it.
 
 - One GitHub issue per feature; branch `type/<issue>-<slug>`; PR body uses
   `Fixes #N`.
-- Roborev runs in auto mode here, see `.claude/rules/roborev-loop.md`: fix
-  what is worth fixing, re-review only while findings above low remain, then
-  commit, push, wait for CI and squash merge.
+- `.claude/rules/workflow.md` is how an issue gets done, from the plan to
+  the merge, and where the user's hands are on it. Read it before starting
+  one. It replaces the auto mode this repository used to run in: a fix that
+  changes code is now discussed, not applied.
+- `.claude/rules/review-findings.md` sorts a review finding into a category
+  and says what each one triggers. Ask when a finding fits none of them.
 - Never mention Claude, AI or LLMs in commits, PR titles/bodies or branch
   names.
