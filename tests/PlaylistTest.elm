@@ -73,6 +73,32 @@ suite =
                         |> List.map (.rating >> Maybe.withDefault 0)
                         |> Expect.equal [ 0, 2, 5 ]
             ]
+        , describe "sortRows"
+            [ test "gives every row the place it holds in the playlist" <|
+                \_ ->
+                    Playlist.sortRows Nothing library
+                        |> List.map Tuple.first
+                        |> Expect.equal [ 0, 1, 2 ]
+            , test "a row keeps its place when the order changes" <|
+                \_ ->
+                    Playlist.sortRows (Just { column = Title, ascending = True }) library
+                        |> List.map (\( place, track ) -> ( place, Maybe.withDefault "" track.title ))
+                        |> Expect.equal
+                            [ ( 1, "alpha song" ), ( 0, "Beta song" ), ( 2, "Gamma song" ) ]
+            , test "the same track listed twice gets two different places" <|
+                \_ ->
+                    -- The place is the table's key, so two rows sharing it
+                    -- would make the browser draw one of them.
+                    let
+                        twice : List Tree.Row
+                        twice =
+                            [ song, song, { song | id = 9, title = Just "Other" } ]
+                    in
+                    Playlist.sortRows (Just { column = Title, ascending = True }) twice
+                        |> List.map Tuple.first
+                        |> List.sort
+                        |> Expect.equal [ 0, 1, 2 ]
+            ]
         , describe "toggleSort"
             [ test "orders by a new column, ascending" <|
                 \_ ->

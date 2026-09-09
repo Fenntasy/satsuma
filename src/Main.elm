@@ -7,6 +7,7 @@ import Dict exposing (Dict)
 import Html exposing (Html, button, div, h1, h2, input, main_, nav, p, span, text)
 import Html.Attributes as Attr exposing (attribute, class, classList, title, type_)
 import Html.Events exposing (onClick, onDoubleClick, onInput)
+import Html.Keyed
 import Html.Lazy
 import Json.Decode as Decode
 import Json.Encode as Encode
@@ -59,10 +60,11 @@ type alias Model =
     , activePlaylist : Maybe Int
     , sort : Maybe Playlist.Sort
 
-    -- The open playlist in the order the table shows it. Kept here rather
-    -- than sorted in the view, where a new list every render would defeat
-    -- the lazy node that draws the rows.
-    , sortedTracks : List Tree.Row
+    -- The open playlist in the order the table shows it, each row with its
+    -- place in the playlist. Kept here rather than sorted in the view,
+    -- where a new list every render would defeat the lazy node that draws
+    -- the rows.
+    , sortedTracks : List ( Int, Tree.Row )
     , widths : Dict String Int
     , renaming : Maybe ( Int, String )
     , playlistError : Maybe String
@@ -169,23 +171,11 @@ update msg model =
             )
 
         DeletePlaylist id ->
-            -- Only the open playlist being deleted changes what is shown;
-            -- deleting another tab must not move the user.
-            ( if Maybe.map .id (activePlaylist model) == Just id then
-                -- Also resorted: the rows of the playlist just deleted
-                -- would otherwise show under whichever tab takes over,
-                -- until the reload lands.
-                resort
-                    { model
-                        | activePlaylist = Nothing
-                        , sort = Nothing
-                        , playlists = List.filter (\p -> p.id /= id) model.playlists
-                    }
-
-              else
-                model
-            , invoke "delete_playlist" [ ( "id", Encode.int id ) ]
-            )
+            -- Nothing is taken away here: the tab goes when the reload
+            -- says it is gone. Dropping it first meant a refused delete
+            -- had to be undone, and the undo could not tell which tab to
+            -- put the user back on.
+            ( model, invoke "delete_playlist" [ ( "id", Encode.int id ) ] )
 
         StartRenaming id name ->
             -- The button it replaces is gone, so nothing would have focus.
@@ -328,13 +318,21 @@ nextPlaylistName playlists =
 
 
 {-| The playlist the tabs are showing, which is the first one until the
-user picks another.
+user picks another, and the first one again once the one they picked is
+gone. That last fallback is what lets a delete be optimistic about
+nothing: the tab disappears when the reload no longer lists it, and a
+delete the backend refuses leaves the user exactly where they were.
 -}
 activePlaylist : Model -> Maybe Playlist.Playlist
 activePlaylist model =
     case model.activePlaylist of
         Just id ->
-            List.filter (\playlist -> playlist.id == id) model.playlists |> List.head
+            case List.filter (\playlist -> playlist.id == id) model.playlists of
+                found :: _ ->
+                    Just found
+
+                [] ->
+                    List.head model.playlists
 
         Nothing ->
             List.head model.playlists
@@ -347,14 +345,14 @@ resort model =
     { model
         | sortedTracks =
             activePlaylist model
-                |> Maybe.map (.tracks >> Playlist.sortBy model.sort)
+                |> Maybe.map (.tracks >> Playlist.sortRows model.sort)
                 |> Maybe.withDefault []
     }
 
 
 visibleIds : Model -> List Int
 visibleIds model =
-    List.map .id model.sortedTracks
+    List.map (Tuple.second >> .id) model.sortedTracks
 
 
 updateLibrary : Model -> ( Library.Model, Cmd Library.Msg ) -> ( Model, Cmd Msg )
@@ -381,8 +379,10 @@ handlePlaylistResult command outcome model =
                 Cmd.none
 
               else
-                -- A change may have been undone in the panel before the
-                -- backend refused it, and the backend is what decides.
+                -- Nothing here changes the panel before the backend
+                -- answers, so this undoes nothing; it resyncs. A command
+                -- refused because the settings moved under us leaves the
+                -- panel showing what is no longer there.
                 listPlaylists
             )
 
@@ -659,7 +659,7 @@ onEnterOrEscape commit cancel =
         )
 
 
-viewTable : Model -> Playlist.Playlist -> List Tree.Row -> Html Msg
+viewTable : Model -> Playlist.Playlist -> List ( Int, Tree.Row ) -> Html Msg
 viewTable model playlist tracks =
     div [ class "playlist" ]
         [ Html.table [ class "playlist-table" ]
@@ -684,9 +684,18 @@ playingId model =
     model.player.state.track |> Maybe.map .id |> Maybe.withDefault 0
 
 
-viewRows : Int -> List Tree.Row -> Html Msg
+{-| Keyed on the place each row holds in the playlist: sorting a column
+reorders thousands of rows, and without a key the browser rewrites every
+cell of every one of them instead of moving the rows it already has.
+-}
+viewRows : Int -> List ( Int, Tree.Row ) -> Html Msg
 viewRows playing tracks =
-    Html.tbody [] (List.map (viewRow playing) tracks)
+    Html.Keyed.node "tbody"
+        []
+        (List.map
+            (\( place, track ) -> ( String.fromInt place, viewRow playing track ))
+            tracks
+        )
 
 
 viewHeading : Model -> Column -> Html Msg

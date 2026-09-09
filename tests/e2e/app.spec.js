@@ -699,9 +699,33 @@ test("a playlist command that fails puts the tab back", async ({ page }) => {
 
   await page.getByTitle("Delete Second").click();
   await expect(page.getByText("that playlist is not there any more")).toBeVisible();
-  // The panel dropped the tab before asking; the backend refused, so it
-  // must come back rather than staying gone until a restart.
+  // The backend refused, so the tab must still be there.
   await expect(page.getByRole("button", { name: "Second" })).toBeVisible();
+});
+
+test("a refused delete leaves the user on the playlist they were reading", async ({
+  page,
+}) => {
+  // The tab coming back is not enough: being moved to First and shown its
+  // rows says the delete worked, which is the opposite of what happened.
+  await openWithPlaylist(page, [
+    { id: 1, name: "First", tracks: [ROWS[0]] },
+    { id: 2, name: "Second", tracks: [ROWS[1], ROWS[2]] },
+  ]);
+  await page.getByRole("button", { name: "Second" }).click();
+  await page.getByRole("button", { name: "Title" }).click();
+  const titles = page.locator(".playlist-row td:nth-child(4)");
+  await expect(titles).toHaveText(["Three", "Two"]);
+
+  await page.evaluate(() =>
+    window.__SATSUMA_TEST__.failWith("delete_playlist", "that playlist is not there any more"),
+  );
+  await page.getByTitle("Delete Second").click();
+  await expect(page.getByText("that playlist is not there any more")).toBeVisible();
+
+  await expect(page.locator(".tab.is-active")).toHaveText(/Second/);
+  // Second's own rows, still in the order the user put them in.
+  await expect(titles).toHaveText(["Three", "Two"]);
 });
 
 test("a playlist is deleted", async ({ page }) => {

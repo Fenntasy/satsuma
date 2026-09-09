@@ -18,9 +18,10 @@ run in auto mode, without per-finding approval.
 
 ## Before asking for a review
 
-- **Walk the checklists first.** `.claude/rules/elm.md`, `.claude/rules/rust.md`
-  and `.claude/rules/testing.md` exist because the review found the same
-  mistakes round after round. A review is not the place to discover them.
+- **Walk the checklists first.** The `/elm`, `/rust` and `/tauri` skills end
+  in a checklist and a table of anti-patterns; `.claude/rules/testing.md`
+  exists because the review found the same mistakes round after round. A
+  review is not the place to discover any of them.
 - **Fix the class, not the instance.** When a finding names one broken lazy
   argument, one ignored write result or one unvalidated range, search for the
   others before answering it. Four rounds went on one Elm invariant fixed one

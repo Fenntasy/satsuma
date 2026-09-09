@@ -9,6 +9,7 @@ module Playlist exposing
     , defaultWidth
     , footerText
     , sortBy
+    , sortRows
     , toggleSort
     )
 
@@ -141,26 +142,50 @@ toggleSort column current =
 -}
 sortBy : Maybe Sort -> List Tree.Row -> List Tree.Row
 sortBy sort tracks =
+    sortRows sort tracks |> List.map Tuple.second
+
+
+{-| The same order, with every row keeping the place it holds in the
+playlist itself.
+
+That place is what tells two rows apart: a playlist may list the same
+track twice, so the track id is not unique within it, and the table needs
+a key that is. Sorting moves a row around but never changes its place.
+
+-}
+sortRows : Maybe Sort -> List Tree.Row -> List ( Int, Tree.Row )
+sortRows sort tracks =
+    let
+        placed : List ( Int, Tree.Row )
+        placed =
+            List.indexedMap Tuple.pair tracks
+    in
     case sort of
         Nothing ->
-            tracks
+            placed
 
         Just { column, ascending } ->
             let
-                ordered : List Tree.Row
+                ordered : List ( Int, Tree.Row )
                 ordered =
                     case column of
                         Track ->
-                            List.sortBy (\track -> Maybe.withDefault 0 track.trackNumber) tracks
+                            List.sortBy
+                                (\( _, track ) -> Maybe.withDefault 0 track.trackNumber)
+                                placed
 
                         Duration ->
-                            List.sortBy .durationMs tracks
+                            List.sortBy (\( _, track ) -> track.durationMs) placed
 
                         Rating ->
-                            List.sortBy (\track -> Maybe.withDefault 0 track.rating) tracks
+                            List.sortBy
+                                (\( _, track ) -> Maybe.withDefault 0 track.rating)
+                                placed
 
                         _ ->
-                            List.sortBy (cellText column >> String.toLower) tracks
+                            List.sortBy
+                                (\( _, track ) -> cellText column track |> String.toLower)
+                                placed
             in
             if ascending then
                 ordered

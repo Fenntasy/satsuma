@@ -115,7 +115,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("settings.json");
         std::fs::write(&path, b"{ not json").expect("write");
-        assert!(load(&path).is_err());
+        let message = load(&path).unwrap_err();
+        assert!(
+            message.starts_with("the settings file cannot be read"),
+            "a file that will not parse has to say so, not report something \
+             else that also went wrong: {message}"
+        );
     }
 
     #[test]

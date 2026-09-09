@@ -30,6 +30,42 @@ log = "=0.4.34"
 [dev-dependencies]
 tempfile = "=3.27.0"
 
+[profile.dev]
+incremental = true
+
+# A player ships as a binary someone downloads, so the release build is
+# tuned for size. `panic` is deliberately left unwinding: a panic in the
+# player thread must not take the window down with it, and the recovery
+# from a poisoned lock in `commands.rs` only means anything while a panic
+# unwinds.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
+[lints.rust]
+ambiguous_negative_literals = "warn"
+missing_debug_implementations = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+# Lints that catch the mistakes this repository actually made: an override
+# with no reason, a write whose result was dropped, a panic with nothing in
+# its message.
+allow_attributes_without_reason = "warn"
+assertions_on_result_states = "warn"
+clone_on_ref_ptr = "warn"
+if_then_some_else_none = "warn"
+map_err_ignore = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+unused_result_ok = "warn"

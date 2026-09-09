@@ -16,11 +16,16 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
 
 ## Rules
 
-`.claude/rules/` holds what the review has caught more than once:
-`elm.md` (lazy rendering, events, replies), `rust.md` (nothing succeeds
-quietly, the file decides), `testing.md` (a test must be able to fail) and
-`roborev-loop.md` (how the review loop runs and ends). Read them before
-writing code in either language, not after a review names one of them.
+Language guidance comes from the global skills: `/elm` (the Elm
+Architecture, impossible states, module growth, lazy and keyed
+rendering), `/rust` (lint sets, errors, panics, API shape) and `/tauri`
+(what belongs in the core, commands versus events, binary size). Load
+them before writing code in either language, not after a review names
+something they cover.
+
+`.claude/rules/` holds only what is specific to this repository:
+`testing.md` (a test must be able to fail) and `roborev-loop.md` (how the
+review loop runs and ends).
 
 ## Conventions
 

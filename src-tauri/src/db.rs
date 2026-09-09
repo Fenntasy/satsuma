@@ -114,6 +114,7 @@ pub struct FileStamp {
     pub size: i64,
 }
 
+#[derive(Debug)]
 pub struct Db {
     conn: Connection,
 }

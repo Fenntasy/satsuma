@@ -68,8 +68,11 @@ fn lock_status(status: &Mutex<ScanStatus>) -> MutexGuard<'_, ScanStatus> {
 }
 
 /// Shared application state managed by Tauri.
+#[derive(Debug)]
 pub struct AppState {
-    pub db: Mutex<Db>,
+    /// Not `pub`: the lock is the scanner's business, which needs to let go
+    /// of it between batches. Everything else goes through [`Self::with_db`].
+    pub(crate) db: Mutex<Db>,
     scan: Arc<Mutex<ScanStatus>>,
     settings_path: PathBuf,
     /// Held across reading, changing and writing the settings file: the
@@ -156,7 +159,10 @@ pub fn ping() -> String {
 ///
 /// Returns a message when the database cannot be read.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn list_folders(state: State<'_, AppState>) -> Result<Vec<Folder>, String> {
     state.with_db(Db::list_folders)
 }
@@ -166,7 +172,10 @@ pub fn list_folders(state: State<'_, AppState>) -> Result<Vec<Folder>, String> {
 /// Returns a message when the folder is already in the library or the
 /// database cannot be written.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn add_folder(state: State<'_, AppState>, path: String) -> Result<Folder, String> {
     let folder = state.with_db(|db| db.add_folder(&path))?;
     state.remember_folders();
@@ -177,7 +186,10 @@ pub fn add_folder(state: State<'_, AppState>, path: String) -> Result<Folder, St
 ///
 /// Returns a message when the database cannot be written.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn remove_folder(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     state.with_db(|db| db.remove_folder(id))?;
     state.remember_folders();
@@ -188,7 +200,10 @@ pub fn remove_folder(state: State<'_, AppState>, id: i64) -> Result<(), String> 
 ///
 /// Returns a message when the database cannot be read.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn library_stats(state: State<'_, AppState>) -> Result<LibraryStats, String> {
     state.with_db(Db::stats)
 }
@@ -214,7 +229,10 @@ pub async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
 /// When a scan is already running, another pass is queued instead: folders
 /// added meanwhile are picked up as soon as the current pass ends.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn start_scan(app: AppHandle, state: State<'_, AppState>) {
     let scan = Arc::clone(&state.scan);
     if !lock_status(&scan).claim() {
@@ -348,7 +366,10 @@ pub struct PlaylistView {
 ///
 /// Returns a message when the library cannot be read.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn list_playlists(state: State<'_, AppState>) -> Result<Vec<PlaylistView>, String> {
     let saved = state.settings()?.playlists;
     let rows = state.with_db(Db::library_rows)?;
@@ -382,7 +403,10 @@ fn resolve_playlists(saved: Vec<settings::Playlist>, rows: &[LibraryRow]) -> Vec
 /// Returns a message when the name is empty, or when the settings cannot
 /// be written.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn create_playlist(state: State<'_, AppState>, name: String) -> Result<u32, String> {
     create(&state, &name)
 }
@@ -406,7 +430,10 @@ fn create(state: &AppState, name: &str) -> Result<u32, String> {
 /// Returns a message when the name is empty, when no playlist has that id,
 /// or when the settings cannot be written.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn rename_playlist(state: State<'_, AppState>, id: u32, name: String) -> Result<(), String> {
     rename(&state, id, &name)
 }
@@ -428,7 +455,10 @@ fn rename(state: &AppState, id: u32, name: &str) -> Result<(), String> {
 /// Returns a message when no playlist has that id, or when the settings
 /// cannot be written.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn delete_playlist(state: State<'_, AppState>, id: u32) -> Result<(), String> {
     delete(&state, id)
 }
@@ -449,7 +479,10 @@ fn delete(state: &AppState, id: u32) -> Result<(), String> {
 /// Returns a message when the library cannot be read, when no playlist has
 /// that id, or when the settings cannot be written.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn add_to_playlist(state: State<'_, AppState>, id: u32, ids: Vec<i64>) -> Result<(), String> {
     add_tracks(&state, id, &ids)
 }
@@ -476,7 +509,10 @@ fn add_tracks(state: &AppState, id: u32, ids: &[i64]) -> Result<(), String> {
 /// Returns a message when the track is unknown or the file cannot be
 /// written.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn set_rating(state: State<'_, AppState>, id: i64, stars: Option<u8>) -> Result<(), String> {
     // Checked here rather than trusted: the file would quietly lose its
     // rating while the cache kept the impossible number.
@@ -501,7 +537,10 @@ pub fn set_rating(state: State<'_, AppState>, id: i64, stars: Option<u8>) -> Res
 ///
 /// Returns a message when the library cannot be read.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn library_rows(state: State<'_, AppState>) -> Result<Vec<LibraryRow>, String> {
     state.with_db(Db::library_rows)
 }
@@ -516,7 +555,10 @@ pub fn library_rows(state: State<'_, AppState>) -> Result<Vec<LibraryRow>, Strin
 ///
 /// Returns a message when the library cannot be read or the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn play_tracks(
     state: State<'_, AppState>,
     ids: Vec<i64>,
@@ -538,7 +580,10 @@ pub fn play_tracks(
 ///
 /// Returns a message when the library cannot be read or the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn enqueue_tracks(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
     let tracks = state.with_db(|db| db.tracks_by_ids(&ids))?;
     if tracks.is_empty() {
@@ -553,7 +598,10 @@ pub fn enqueue_tracks(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), S
 ///
 /// Returns a message when the library cannot be read or the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn play_library(state: State<'_, AppState>) -> Result<(), String> {
     let tracks = state.with_db(|db| db.list_tracks(None))?;
     if tracks.is_empty() {
@@ -571,7 +619,10 @@ pub fn play_library(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_state(state: State<'_, AppState>) -> Result<(), String> {
     state.player.send(player::Command::ReportState)
 }
@@ -580,7 +631,10 @@ pub fn player_state(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_play_pause(state: State<'_, AppState>) -> Result<(), String> {
     state.player.send(player::Command::PlayPause)
 }
@@ -589,7 +643,10 @@ pub fn player_play_pause(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_stop(state: State<'_, AppState>) -> Result<(), String> {
     state.player.send(player::Command::Stop)
 }
@@ -598,7 +655,10 @@ pub fn player_stop(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_next(state: State<'_, AppState>) -> Result<(), String> {
     state.player.send(player::Command::Next)
 }
@@ -607,7 +667,10 @@ pub fn player_next(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_previous(state: State<'_, AppState>) -> Result<(), String> {
     state.player.send(player::Command::Previous)
 }
@@ -616,7 +679,10 @@ pub fn player_previous(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_seek(state: State<'_, AppState>, position_ms: u64) -> Result<(), String> {
     state
         .player
@@ -627,7 +693,10 @@ pub fn player_seek(state: State<'_, AppState>, position_ms: u64) -> Result<(), S
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), String> {
     state.player.send(player::Command::SetVolume(volume))
 }
@@ -636,7 +705,10 @@ pub fn player_set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), 
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_set_shuffle(state: State<'_, AppState>, shuffle: bool) -> Result<(), String> {
     state.player.send(player::Command::SetShuffle(shuffle))
 }
@@ -645,7 +717,10 @@ pub fn player_set_shuffle(state: State<'_, AppState>, shuffle: bool) -> Result<(
 ///
 /// Returns a message when the repeat mode is unknown or the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_set_repeat(state: State<'_, AppState>, repeat: String) -> Result<(), String> {
     let repeat = match repeat.as_str() {
         "off" => Repeat::Off,
@@ -662,7 +737,10 @@ pub fn player_set_repeat(state: State<'_, AppState>, repeat: String) -> Result<(
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_play_next(state: State<'_, AppState>, index: usize) -> Result<(), String> {
     state.player.send(player::Command::PlayNext(index))
 }
@@ -673,7 +751,10 @@ pub fn player_play_next(state: State<'_, AppState>, index: usize) -> Result<(), 
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_jump_to(state: State<'_, AppState>, index: usize) -> Result<(), String> {
     state.player.send(player::Command::JumpTo(index))
 }
@@ -684,7 +765,10 @@ pub fn player_jump_to(state: State<'_, AppState>, index: usize) -> Result<(), St
 ///
 /// Returns a message when the library cannot be read or the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn enqueue_library(state: State<'_, AppState>) -> Result<(), String> {
     let tracks = state.with_db(|db| db.list_tracks(None))?;
     if tracks.is_empty() {
@@ -697,7 +781,10 @@ pub fn enqueue_library(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_set_stop_after_current(state: State<'_, AppState>, stop: bool) -> Result<(), String> {
     state
         .player
@@ -791,25 +878,43 @@ mod tests {
     #[test]
     fn a_playlist_name_cannot_be_empty() {
         assert_eq!(super::check_name("  Loud  "), Ok("Loud".to_owned()));
-        assert!(super::check_name("   ").is_err());
+        assert_eq!(
+            super::check_name("   ").unwrap_err(),
+            "a playlist needs a name"
+        );
     }
 
     #[test]
     fn a_change_to_a_playlist_that_is_gone_is_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = state(dir.path());
-        let id = super::create(&state, "Mine").expect("create");
+        let gone = super::create(&state, "Mine").expect("create");
+        // A second playlist that stays: without one, "the settings are
+        // unchanged" would hold however the refused calls behaved, since
+        // none of them can add a playlist.
+        let kept = super::create(&state, "Kept").expect("create");
 
-        super::delete(&state, id).expect("delete");
+        super::delete(&state, gone).expect("delete");
         // Everything that changes a playlist has to notice it is gone,
-        // rather than reporting a change it did not make.
-        assert!(super::delete(&state, id).is_err());
-        assert!(super::rename(&state, id, "Other").is_err());
-        assert!(super::add_tracks(&state, id, &[1]).is_err());
-        assert!(
-            state.settings().expect("load").playlists.is_empty(),
-            "a refused change must leave the settings alone"
-        );
+        // rather than reporting a change it did not make. The message is
+        // checked too: `is_err` passes for the wrong error.
+        for (what, outcome) in [
+            ("delete", super::delete(&state, gone)),
+            ("rename", super::rename(&state, gone, "Other")),
+            ("add tracks", super::add_tracks(&state, gone, &[1])),
+        ] {
+            assert_eq!(
+                outcome.unwrap_err(),
+                "that playlist is not there any more",
+                "{what} on a playlist that is gone"
+            );
+        }
+
+        let left = state.settings().expect("load").playlists;
+        assert_eq!(left.len(), 1, "a refused change must add nothing");
+        assert_eq!(left[0].id, kept, "and must not touch the one still there");
+        assert_eq!(left[0].name, "Kept", "least of all rename it");
+        assert!(left[0].tracks.is_empty(), "nor give it tracks");
     }
 
     #[test]
@@ -823,7 +928,10 @@ mod tests {
             "Loud",
             "the name is stored without the spaces around it"
         );
-        assert!(super::create(&state, "  ").is_err());
+        assert_eq!(
+            super::create(&state, "  ").unwrap_err(),
+            "a playlist needs a name"
+        );
 
         let second = super::create(&state, "Quiet").expect("create");
         assert_ne!(first, second);

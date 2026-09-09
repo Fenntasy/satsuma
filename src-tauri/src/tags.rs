@@ -200,7 +200,7 @@ pub(crate) mod tests {
     use lofty::tag::items::Timestamp;
     use lofty::tag::{Tag, TagType};
 
-    use super::{is_audio_file, read_tags};
+    use super::{is_audio_file, read_tags, TagError};
     use crate::grouping::{Grouping, Kind, Vibe, Volume};
 
     pub(crate) const FIXTURE: &str =
@@ -311,7 +311,13 @@ pub(crate) mod tests {
 
     #[test]
     fn unreadable_path_is_an_error() {
-        assert!(read_tags(Path::new("/definitely/missing.mp3")).is_err());
+        let error = read_tags(Path::new("/definitely/missing.mp3")).unwrap_err();
+        // The path has to be in the message: "cannot read tags" alone tells
+        // nobody which file of a library-wide scan went wrong.
+        assert!(
+            matches!(&error, TagError::Read { path, .. } if path == "/definitely/missing.mp3"),
+            "expected a read error naming the file, got {error:?}"
+        );
     }
 
     #[test]
