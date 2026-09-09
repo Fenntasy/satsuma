@@ -628,6 +628,26 @@ test("escape gives up on a rename", async ({ page }) => {
   expect(await calls(page)).toEqual([]);
 });
 
+test("deleting a background tab leaves the open one alone", async ({ page }) => {
+  const two = [
+    { id: 1, name: "First", tracks: [ROWS[0]] },
+    { id: 2, name: "Second", tracks: [ROWS[1]] },
+  ];
+  await openWithPlaylist(page, two);
+  await page.getByRole("button", { name: "Second" }).click();
+  await expect(page.locator(".playlist-row")).toHaveCount(1);
+
+  await page.evaluate(() =>
+    window.__SATSUMA_TEST__.reply("list_playlists", [
+      { id: 2, name: "Second", tracks: [] },
+    ]),
+  );
+  await page.getByTitle("Delete First").click();
+  // Still on Second, which now shows as empty, rather than jumping away.
+  await expect(page.getByRole("button", { name: "Second" })).toBeVisible();
+  await expect(page.locator(".playlist-row")).toHaveCount(0);
+});
+
 test("a playlist is deleted", async ({ page }) => {
   await openWithPlaylist(page);
   await clearCalls(page);

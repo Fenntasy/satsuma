@@ -58,6 +58,11 @@ type alias Model =
     , playlists : List Playlist.Playlist
     , activePlaylist : Maybe Int
     , sort : Maybe Playlist.Sort
+
+    -- The open playlist in the order the table shows it. Kept here rather
+    -- than sorted in the view, where a new list every render would defeat
+    -- the lazy node that draws the rows.
+    , sortedTracks : List Tree.Row
     , widths : Dict String Int
     , renaming : Maybe ( Int, String )
     , playlistError : Maybe String
@@ -91,6 +96,7 @@ init flags =
       , playlists = []
       , activePlaylist = Nothing
       , sort = Nothing
+      , sortedTracks = []
       , widths =
             Decode.decodeValue (Decode.dict Decode.int) flags.widths
                 |> Result.withDefault Dict.empty
@@ -154,7 +160,7 @@ update msg model =
                 |> updatePlayer model
 
         SelectPlaylist id ->
-            ( { model | activePlaylist = Just id, sort = Nothing }, Cmd.none )
+            ( resort { model | activePlaylist = Just id, sort = Nothing }, Cmd.none )
 
         NewPlaylist ->
             ( model
@@ -163,7 +169,13 @@ update msg model =
             )
 
         DeletePlaylist id ->
-            ( { model | activePlaylist = Nothing }
+            -- Only the open playlist being deleted changes what is shown;
+            -- deleting another tab must not move the user.
+            ( if Maybe.map .id (activePlaylist model) == Just id then
+                { model | activePlaylist = Nothing, sort = Nothing }
+
+              else
+                model
             , invoke "delete_playlist" [ ( "id", Encode.int id ) ]
             )
 
@@ -193,7 +205,7 @@ update msg model =
             ( { model | renaming = Nothing }, Cmd.none )
 
         SortBy column ->
-            ( { model | sort = Playlist.toggleSort column model.sort }, Cmd.none )
+            ( resort { model | sort = Playlist.toggleSort column model.sort }, Cmd.none )
 
         Rate id stars ->
             ( model
@@ -320,18 +332,21 @@ activePlaylist model =
             List.head model.playlists
 
 
-{-| The tracks of the open playlist, in the order the table shows them.
+{-| Works out the order the table shows, after anything that changes it.
 -}
-visibleTracks : Model -> List Tree.Row
-visibleTracks model =
-    activePlaylist model
-        |> Maybe.map (.tracks >> Playlist.sortBy model.sort)
-        |> Maybe.withDefault []
+resort : Model -> Model
+resort model =
+    { model
+        | sortedTracks =
+            activePlaylist model
+                |> Maybe.map (.tracks >> Playlist.sortBy model.sort)
+                |> Maybe.withDefault []
+    }
 
 
 visibleIds : Model -> List Int
 visibleIds model =
-    List.map .id (visibleTracks model)
+    List.map .id model.sortedTracks
 
 
 updateLibrary : Model -> ( Library.Model, Cmd Library.Msg ) -> ( Model, Cmd Msg )
@@ -363,7 +378,9 @@ handlePlaylistResult command outcome model =
             Just
                 (case Decode.decodeValue (Decode.list Playlist.decoder) payload of
                     Ok playlists ->
-                        ( { model | playlists = playlists, playlistError = Nothing }, Cmd.none )
+                        ( resort { model | playlists = playlists, playlistError = Nothing }
+                        , Cmd.none
+                        )
 
                     Err error ->
                         failed (Decode.errorToString error)
@@ -373,7 +390,11 @@ handlePlaylistResult command outcome model =
             Just
                 (case Decode.decodeValue Decode.int payload of
                     Ok id ->
-                        ( { model | activePlaylist = Just id, playlistError = Nothing }
+                        ( { model
+                            | activePlaylist = Just id
+                            , sort = Nothing
+                            , playlistError = Nothing
+                          }
                         , listPlaylists
                         )
 
@@ -527,7 +548,7 @@ viewMain model =
                     ]
 
             Just playlist ->
-                viewTable model playlist (visibleTracks model)
+                viewTable model playlist model.sortedTracks
         , viewPlaylistError model.playlistError
         ]
 
