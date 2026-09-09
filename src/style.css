@@ -95,8 +95,11 @@ body {
 }
 
 .sidebar-content {
+  display: flex;
   flex: 1;
-  overflow: auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
   padding: 16px;
 }
 
@@ -429,8 +432,18 @@ input[type="range"] {
 
 .tree-panel {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-height: 0;
+}
+
+/* The browser scrolls on its own, so opening a genre cannot push the
+   folders and the buttons out of reach. */
+.tree-panel > .tree,
+.tree-panel > .muted {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .tree-controls {

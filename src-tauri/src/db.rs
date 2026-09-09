@@ -376,7 +376,8 @@ impl Db {
         Ok(tracks)
     }
 
-    /// Everything the library tree groups by, for every track.
+    /// Everything the library tree groups by, for every track. The order
+    /// is left to the frontend, which sorts by whatever it groups by.
     ///
     /// # Errors
     ///
@@ -385,11 +386,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, genre, artist, album, title, track_number, disc_number,
                     duration_ms
-             FROM tracks
-             ORDER BY genre IS NULL, genre, artist IS NULL, artist,
-                      album IS NULL, album,
-                      disc_number IS NULL, disc_number,
-                      track_number IS NULL, track_number, title",
+             FROM tracks",
         )?;
         let rows = stmt
             .query_map([], |row| {

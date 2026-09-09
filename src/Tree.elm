@@ -4,9 +4,11 @@ module Tree exposing
     , Node
     , Row
     , build
+    , buildSorted
     , groupingLabel
     , groupings
     , rowDecoder
+    , sortFor
     )
 
 {-| Turning the library into the tree the left panel shows.
@@ -86,9 +88,22 @@ type Children
 
 
 {-| Builds the tree, keeping only the rows that match `filter`.
+
+Sorting is the expensive half and does not depend on the filter, so a
+caller that filters often sorts once with [`sortFor`] and then calls
+[`buildSorted`].
+
 -}
 build : Grouping -> String -> List Row -> List Node
 build grouping filter rows =
+    buildSorted grouping filter (sortFor grouping rows)
+
+
+{-| As [`build`], for rows already ordered by [`sortFor`] for this same
+grouping. Filtering keeps the order it was given.
+-}
+buildSorted : Grouping -> String -> List Row -> List Node
+buildSorted grouping filter rows =
     let
         kept : List Row
         kept =
@@ -98,9 +113,7 @@ build grouping filter rows =
             else
                 List.filter (matches filter) rows
     in
-    kept
-        |> sortFor grouping
-        |> group (levels grouping) (groupingKey grouping)
+    group (levels grouping) (groupingKey grouping) kept
 
 
 {-| The start of every path, so what is expanded under one grouping does
@@ -134,7 +147,8 @@ separator =
     "\u{001F}"
 
 
-{-| Orders the rows by the levels they will be grouped under.
+{-| Orders the rows by the levels they will be grouped under, then by disc,
+track and title.
 
 The database sorts by genre first, so grouping by artist alone would
 otherwise meet the same artist twice and give it two branches. The sort is
@@ -170,15 +184,13 @@ matches filter row =
         needle : String
         needle =
             String.toLower (String.trim filter)
-
-        haystack : String
-        haystack =
-            [ row.genre, row.artist, row.album, row.title ]
-                |> List.filterMap identity
-                |> String.join " "
-                |> String.toLower
     in
-    String.contains needle haystack
+    -- Each field on its own: joining them would match across their
+    -- boundaries, so "alpha first" would find artist Alpha next to album
+    -- First and the hit would be impossible to explain.
+    [ row.genre, row.artist, row.album, row.title ]
+        |> List.filterMap identity
+        |> List.any (\field -> String.contains needle (String.toLower field))
 
 
 {-| The fields to group by, outermost first.

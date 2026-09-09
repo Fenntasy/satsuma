@@ -80,6 +80,10 @@ type alias Model =
     , scan : ScanState
     , error : Maybe String
     , rows : List Tree.Row
+
+    -- Sorted for the current grouping, so typing in the filter does not
+    -- sort the whole library again on every keystroke.
+    , sortedRows : List Tree.Row
     , grouping : Grouping
     , filter : String
 
@@ -96,6 +100,7 @@ init =
       , scan = Requested
       , error = Nothing
       , rows = []
+      , sortedRows = []
       , grouping = GenreArtistAlbum
       , filter = ""
       , expanded = Set.empty
@@ -179,7 +184,12 @@ update msg model =
             ( { model | filter = filter }, Cmd.none )
 
         SetGrouping grouping ->
-            ( { model | grouping = grouping }, Cmd.none )
+            ( { model
+                | grouping = grouping
+                , sortedRows = Tree.sortFor grouping model.rows
+              }
+            , Cmd.none
+            )
 
 
 toggle : String -> Set String -> Set String
@@ -213,7 +223,11 @@ handleInvokeResult command outcome model =
                 (decodeInto (Decode.list Tree.rowDecoder)
                     outcome
                     model
-                    (\rows m -> ( { m | rows = rows }, Cmd.none ))
+                    (\rows m ->
+                        ( { m | rows = rows, sortedRows = Tree.sortFor m.grouping rows }
+                        , Cmd.none
+                        )
+                    )
                 )
 
         "play_tracks" ->
@@ -367,7 +381,6 @@ view model =
         , p [ class "library-stats" ] [ text (statsText model.stats) ]
         , viewScan model.scan
         , viewError model.error
-        , viewTree model
         , h2 [] [ text "Folders" ]
         , viewFolders model.folders
         , div [ class "library-actions" ]
@@ -395,6 +408,7 @@ view model =
                 ]
                 [ text "Rescan" ]
             ]
+        , viewTree model
         ]
 
 
@@ -527,7 +541,7 @@ viewTree model =
     -- Rebuilding the tree is the expensive part of this panel, and the
     -- player reports its position several times a second: only redo it
     -- when what it is built from changed.
-    Html.Lazy.lazy4 viewTreeFor model.rows model.grouping model.filter model.expanded
+    Html.Lazy.lazy4 viewTreeFor model.sortedRows model.grouping model.filter model.expanded
 
 
 viewTreeFor : List Tree.Row -> Grouping -> String -> Set String -> Html Msg
@@ -535,7 +549,7 @@ viewTreeFor rows grouping filter expanded =
     let
         nodes : List Tree.Node
         nodes =
-            Tree.build grouping filter rows
+            Tree.buildSorted grouping filter rows
     in
     div [ class "tree-panel" ]
         [ h2 [] [ text "Browse" ]
@@ -644,13 +658,14 @@ viewNode expanded siblings node =
 
                  -- The full name: the sidebar is narrow and long album
                  -- titles all truncate to the same thing.
-                 , title node.label
+                 , title (node.label ++ hint node.children)
                  ]
                     ++ (case node.children of
                             Track ->
-                                -- One click plays it, so a double click
-                                -- must not restart it twice over.
-                                [ onClick (Play (queueFor siblings ids) (List.head ids)) ]
+                                -- Playing on a single click would restart
+                                -- the track on the second half of a double
+                                -- click, which is an audible stutter.
+                                [ onDoubleClick (Play (queueFor siblings ids) (List.head ids)) ]
 
                             Branches _ ->
                                 [ onClick (Toggle node.path)
@@ -679,6 +694,18 @@ viewNode expanded siblings node =
             Track ->
                 text ""
         ]
+
+
+{-| Says how to play a row, since a single click only opens a branch.
+-}
+hint : Children -> String
+hint children =
+    case children of
+        Track ->
+            " (double-click to play)"
+
+        Branches _ ->
+            ""
 
 
 {-| What to queue when a track is chosen: its siblings when it has any, so

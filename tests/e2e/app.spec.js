@@ -383,16 +383,22 @@ test("a branch says how many tracks are under it", async ({ page }) => {
   );
 });
 
-test("clicking a track plays it", async ({ page }) => {
+test("a track plays on a double click, not on a single one", async ({ page }) => {
   await open(page);
   await page.getByRole("button", { name: "Indie" }).click();
   await page.getByRole("button", { name: "Alpha" }).click();
   await page.getByRole("button", { name: "First" }).click();
   await clearCalls(page);
 
+  // A single click does not play: that would restart the track on the
+  // second half of a double click.
   await page.getByRole("button", { name: "1. One" }).click();
+  await expect(page.locator("body")).toBeVisible();
+  expect(await calls(page)).toEqual([]);
+
   // The rest of the album follows it, rather than the queue holding one
   // track and stopping.
+  await page.getByRole("button", { name: "1. One" }).dblclick();
   await expect.poll(() => calls(page)).toEqual([
     { command: "play_tracks", args: { ids: [1, 2], startId: 1 } },
   ]);
@@ -405,13 +411,13 @@ test("choosing the second track plays the album from there", async ({ page }) =>
   await page.getByRole("button", { name: "First" }).click();
   await clearCalls(page);
 
-  await page.getByRole("button", { name: "2. Two" }).click();
+  await page.getByRole("button", { name: "2. Two" }).dblclick();
   await expect.poll(() => calls(page)).toEqual([
     { command: "play_tracks", args: { ids: [1, 2], startId: 2 } },
   ]);
 });
 
-test("double-clicking a track plays it once, not three times", async ({ page }) => {
+test("double-clicking a track plays it exactly once", async ({ page }) => {
   await open(page);
   await page.getByRole("button", { name: "Indie" }).click();
   await page.getByRole("button", { name: "Alpha" }).click();
@@ -420,7 +426,6 @@ test("double-clicking a track plays it once, not three times", async ({ page }) 
 
   await page.getByRole("button", { name: "1. One" }).dblclick();
   await expect.poll(() => calls(page)).toEqual([
-    { command: "play_tracks", args: { ids: [1, 2], startId: 1 } },
     { command: "play_tracks", args: { ids: [1, 2], startId: 1 } },
   ]);
 });

@@ -104,6 +104,12 @@ suite =
                     Tree.build ArtistAlbum "beta" library
                         |> labels
                         |> Expect.equal [ "Beta" ]
+            , test "does not match across two fields" <|
+                \_ ->
+                    -- "Alpha" is the artist and "First" the album: joining
+                    -- the fields would make this a hit no one can explain.
+                    Tree.build ArtistAlbum "alpha first" library
+                        |> Expect.equal []
             , test "matches a title as well as a name" <|
                 \_ ->
                     Tree.build ArtistAlbum "three" library
