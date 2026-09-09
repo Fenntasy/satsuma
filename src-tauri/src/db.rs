@@ -428,6 +428,44 @@ impl Db {
         Ok(())
     }
 
+    /// A track of this album whose file is known to hold a picture.
+    ///
+    /// The scan already recorded which files do, so the one worth opening
+    /// for a cover is looked up rather than found by opening several.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on query failure.
+    pub fn album_track_with_cover(&self, artist: &str, album: &str) -> Result<Option<String>> {
+        self.album_track_where(artist, album, "AND has_embedded_cover = 1")
+    }
+
+    /// Any track of this album, for looking beside the music.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on query failure.
+    pub fn album_track(&self, artist: &str, album: &str) -> Result<Option<String>> {
+        self.album_track_where(artist, album, "")
+    }
+
+    /// An album is matched on the album artist, falling back to the track
+    /// artist, which is how the cover key is built. An album with no artist
+    /// at all matches the tracks that have none either, rather than every
+    /// album of that name.
+    fn album_track_where(&self, artist: &str, album: &str, extra: &str) -> Result<Option<String>> {
+        let sql = format!(
+            "SELECT path FROM tracks
+             WHERE COALESCE(NULLIF(TRIM(album_artist), ''), NULLIF(TRIM(artist), ''), '') = ?1
+               AND TRIM(album) = ?2 {extra}
+             ORDER BY disc_number, track_number, path
+             LIMIT 1"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let mut rows = stmt.query((artist, album))?;
+        Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
+    }
+
     /// The tracks with these ids, in the order they were asked for. Ids
     /// that are not in the library are skipped.
     ///

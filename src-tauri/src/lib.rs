@@ -1,6 +1,7 @@
 //! Satsuma desktop backend.
 
 pub mod commands;
+pub mod cover;
 pub mod db;
 pub mod grouping;
 pub mod player;
