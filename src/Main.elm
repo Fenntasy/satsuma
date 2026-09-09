@@ -1,16 +1,24 @@
-module Main exposing (BackendStatus, Flags, Model, Msg, Panel, main)
+module Main exposing (BackendStatus, Drag, Flags, Model, Msg, Panel, main)
 
 import Bridge exposing (Incoming(..), Outgoing(..))
 import Browser
-import Html exposing (Html, button, div, h1, h2, main_, nav, p, span, text)
-import Html.Attributes exposing (attribute, class, classList, title, type_)
-import Html.Events exposing (onClick)
+import Browser.Dom
+import Browser.Events
+import Dict exposing (Dict)
+import Html exposing (Html, button, div, h1, h2, input, main_, nav, p, span, text)
+import Html.Attributes as Attr exposing (attribute, class, classList, title, type_)
+import Html.Events exposing (onClick, onDoubleClick, onInput)
+import Html.Keyed
+import Html.Lazy
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Library
 import Player
+import Playlist exposing (Column)
 import Ports
+import Task
 import Theme exposing (Mode(..), Setting(..))
+import Tree
 
 
 main : Program Flags Model Msg
@@ -30,6 +38,9 @@ main =
 type alias Flags =
     { theme : Maybe String
     , systemDark : Bool
+
+    -- A JSON object of column name to width: flags cannot carry a Dict.
+    , widths : Decode.Value
     }
 
 
@@ -46,6 +57,32 @@ type alias Model =
     , backend : BackendStatus
     , library : Library.Model
     , player : Player.Model
+    , playlists : List Playlist.Playlist
+    , activePlaylist : Maybe Int
+    , sort : Maybe Playlist.Sort
+
+    -- The open playlist in the order the table shows it, each row with its
+    -- place in the playlist. Kept here rather than sorted in the view,
+    -- where a new list every render would defeat the lazy node that draws
+    -- the rows.
+    , sortedTracks : List ( Int, Tree.Row )
+    , widths : Dict String Int
+
+    -- Set while a column grip is held. The subscriptions follow the
+    -- pointer only while it is, so nothing listens when nothing is being
+    -- dragged.
+    , dragging : Maybe Drag
+    , renaming : Maybe ( Int, String )
+    , playlistError : Maybe String
+    }
+
+
+{-| A resize in progress: which column, and where the pointer was when it
+was last acted on.
+-}
+type alias Drag =
+    { column : Column
+    , from : Float
     }
 
 
@@ -73,11 +110,22 @@ init flags =
       , backend = Connecting
       , library = library
       , player = player
+      , playlists = []
+      , activePlaylist = Nothing
+      , sort = Nothing
+      , sortedTracks = []
+      , widths =
+            Decode.decodeValue (Decode.dict Decode.int) flags.widths
+                |> Result.withDefault Dict.empty
+      , dragging = Nothing
+      , renaming = Nothing
+      , playlistError = Nothing
       }
     , Cmd.batch
         [ Ports.send (Invoke "ping" (Encode.object []))
         , Cmd.map LibraryMsg libraryCmd
         , Cmd.map PlayerMsg playerCmd
+        , listPlaylists
         ]
     )
 
@@ -91,6 +139,20 @@ type Msg
     | CycleTheme
     | LibraryMsg Library.Msg
     | PlayerMsg Player.Msg
+    | SelectPlaylist Int
+    | NewPlaylist
+    | DeletePlaylist Int
+    | StartRenaming Int String
+    | EditRename String
+    | CommitRename
+    | CancelRename
+    | SortBy Column
+    | Rate Int (Maybe Int)
+    | PlayFrom Int
+    | GripPressed Column Float
+    | PointerMoved Float
+    | PointerReleased
+    | Focused
     | FromJs (Result Decode.Error Incoming)
 
 
@@ -115,6 +177,114 @@ update msg model =
         PlayerMsg playerMsg ->
             Player.update playerMsg model.player
                 |> updatePlayer model
+
+        SelectPlaylist id ->
+            ( resort { model | activePlaylist = Just id, sort = Nothing }, Cmd.none )
+
+        NewPlaylist ->
+            ( model
+            , invoke "create_playlist"
+                [ ( "name", Encode.string (nextPlaylistName model.playlists) ) ]
+            )
+
+        DeletePlaylist id ->
+            -- Nothing is taken away here: the tab goes when the reload
+            -- says it is gone. Dropping it first meant a refused delete
+            -- had to be undone, and the undo could not tell which tab to
+            -- put the user back on.
+            ( model, invoke "delete_playlist" [ ( "id", Encode.int id ) ] )
+
+        StartRenaming id name ->
+            -- The button it replaces is gone, so nothing would have focus.
+            ( { model | renaming = Just ( id, name ) }
+            , Browser.Dom.focus renameFieldId |> Task.attempt (always Focused)
+            )
+
+        EditRename name ->
+            ( { model | renaming = Maybe.map (\( id, _ ) -> ( id, name )) model.renaming }
+            , Cmd.none
+            )
+
+        CommitRename ->
+            case model.renaming of
+                Just ( id, name ) ->
+                    ( { model | renaming = Nothing }
+                    , invoke "rename_playlist"
+                        [ ( "id", Encode.int id ), ( "name", Encode.string name ) ]
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        CancelRename ->
+            ( { model | renaming = Nothing }, Cmd.none )
+
+        SortBy column ->
+            ( resort { model | sort = Playlist.toggleSort column model.sort }, Cmd.none )
+
+        Rate id stars ->
+            ( model
+            , invoke "set_rating"
+                [ ( "id", Encode.int id )
+                , ( "stars", Maybe.map Encode.int stars |> Maybe.withDefault Encode.null )
+                ]
+            )
+
+        PlayFrom id ->
+            ( model
+            , invoke "play_tracks"
+                [ ( "ids", Encode.list Encode.int (visibleIds model) )
+                , ( "startId", Encode.int id )
+                ]
+            )
+
+        Focused ->
+            ( model, Cmd.none )
+
+        GripPressed column x ->
+            ( { model | dragging = Just { column = column, from = x } }, Cmd.none )
+
+        PointerMoved x ->
+            case model.dragging of
+                Just drag ->
+                    let
+                        delta : Int
+                        delta =
+                            round (x - drag.from)
+                    in
+                    if delta == 0 then
+                        -- Nothing moved a whole pixel yet, so the pointer
+                        -- it was measured from stands: rounding away
+                        -- fractions of a pixel one move at a time would
+                        -- lose them all.
+                        ( model, Cmd.none )
+
+                    else
+                        ( { model
+                            | dragging = Just { drag | from = x }
+                            , widths =
+                                Dict.insert
+                                    (Playlist.columnLabel drag.column)
+                                    (max minimumWidth (widthOf model drag.column + delta))
+                                    model.widths
+                          }
+                        , Cmd.none
+                        )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        PointerReleased ->
+            case model.dragging of
+                Just _ ->
+                    -- Saved once, at the end: writing to storage on every
+                    -- move would do it at pointer rate.
+                    ( { model | dragging = Nothing }
+                    , Ports.send (SaveWidths (Dict.toList model.widths))
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
 
         FromJs (Ok (SystemTheme dark)) ->
             ( { model | systemDark = dark }, Cmd.none )
@@ -143,17 +313,90 @@ update msg model =
             ( { model | backend = Unreachable error }, Cmd.none )
 
         FromJs (Ok (InvokeResult command outcome)) ->
-            case Library.handleInvokeResult command outcome model.library of
+            case handlePlaylistResult command outcome model of
                 Just result ->
-                    updateLibrary model result
+                    result
 
                 Nothing ->
-                    Player.handleInvokeResult command outcome model.player
-                        |> Maybe.map (updatePlayer model)
-                        |> Maybe.withDefault ( model, Cmd.none )
+                    case Library.handleInvokeResult command outcome model.library of
+                        Just result ->
+                            updateLibrary model result
+
+                        Nothing ->
+                            Player.handleInvokeResult command outcome model.player
+                                |> Maybe.map (updatePlayer model)
+                                |> Maybe.withDefault ( model, Cmd.none )
 
         FromJs (Err error) ->
             ( { model | backend = Unreachable (Decode.errorToString error) }, Cmd.none )
+
+
+invoke : String -> List ( String, Encode.Value ) -> Cmd Msg
+invoke name args =
+    Ports.send (Invoke name (Encode.object args))
+
+
+listPlaylists : Cmd Msg
+listPlaylists =
+    invoke "list_playlists" []
+
+
+{-| A name for a new playlist that is not taken yet.
+-}
+nextPlaylistName : List Playlist.Playlist -> String
+nextPlaylistName playlists =
+    let
+        taken : Int -> Bool
+        taken n =
+            List.any (\playlist -> playlist.name == "Playlist " ++ String.fromInt n) playlists
+
+        firstFree : Int -> Int
+        firstFree n =
+            if taken n then
+                firstFree (n + 1)
+
+            else
+                n
+    in
+    "Playlist " ++ String.fromInt (firstFree 1)
+
+
+{-| The playlist the tabs are showing, which is the first one until the
+user picks another, and the first one again once the one they picked is
+gone. That last fallback is what lets a delete be optimistic about
+nothing: the tab disappears when the reload no longer lists it, and a
+delete the backend refuses leaves the user exactly where they were.
+-}
+activePlaylist : Model -> Maybe Playlist.Playlist
+activePlaylist model =
+    case model.activePlaylist of
+        Just id ->
+            case List.filter (\playlist -> playlist.id == id) model.playlists of
+                found :: _ ->
+                    Just found
+
+                [] ->
+                    List.head model.playlists
+
+        Nothing ->
+            List.head model.playlists
+
+
+{-| Works out the order the table shows, after anything that changes it.
+-}
+resort : Model -> Model
+resort model =
+    { model
+        | sortedTracks =
+            activePlaylist model
+                |> Maybe.map (.tracks >> Playlist.sortRows model.sort)
+                |> Maybe.withDefault []
+    }
+
+
+visibleIds : Model -> List Int
+visibleIds model =
+    List.map (Tuple.second >> .id) model.sortedTracks
 
 
 updateLibrary : Model -> ( Library.Model, Cmd Library.Msg ) -> ( Model, Cmd Msg )
@@ -166,9 +409,122 @@ updatePlayer model ( player, cmd ) =
     ( { model | player = player }, Cmd.map PlayerMsg cmd )
 
 
+{-| Handles the replies of the playlist commands. Returns `Nothing` when
+the command belongs to another panel.
+-}
+handlePlaylistResult : String -> Result String Decode.Value -> Model -> Maybe ( Model, Cmd Msg )
+handlePlaylistResult command outcome model =
+    let
+        failed : String -> ( Model, Cmd Msg )
+        failed error =
+            ( { model | playlistError = Just error }
+            , if command == "list_playlists" then
+                -- Reloading after a failed reload would never stop.
+                Cmd.none
+
+              else
+                -- Nothing here changes the panel before the backend
+                -- answers, so this undoes nothing; it resyncs. A command
+                -- refused because the settings moved under us leaves the
+                -- panel showing what is no longer there.
+                listPlaylists
+            )
+
+        reload : ( Model, Cmd Msg )
+        reload =
+            ( { model | playlistError = Nothing }, listPlaylists )
+    in
+    case ( command, outcome ) of
+        ( "list_playlists", Ok payload ) ->
+            Just
+                (case Decode.decodeValue (Decode.list Playlist.decoder) payload of
+                    Ok playlists ->
+                        -- The error is left as it is: this reload may be
+                        -- the one a failed command asked for, and it must
+                        -- not wipe the message explaining the failure.
+                        ( resort { model | playlists = playlists }, Cmd.none )
+
+                    Err error ->
+                        failed (Decode.errorToString error)
+                )
+
+        ( "create_playlist", Ok payload ) ->
+            Just
+                (case Decode.decodeValue Decode.int payload of
+                    Ok id ->
+                        ( { model
+                            | activePlaylist = Just id
+                            , sort = Nothing
+                            , playlistError = Nothing
+                          }
+                        , listPlaylists
+                        )
+
+                    Err error ->
+                        failed (Decode.errorToString error)
+                )
+
+        ( "rename_playlist", Ok _ ) ->
+            Just reload
+
+        ( "delete_playlist", Ok _ ) ->
+            Just reload
+
+        ( "add_to_playlist", Ok _ ) ->
+            Just reload
+
+        ( "set_rating", Ok _ ) ->
+            -- The rating went into the file, so the rows have to be read
+            -- again for the stars to show what was written. Only the
+            -- playlist shows them, so the library is left alone.
+            Just ( { model | playlistError = Nothing }, listPlaylists )
+
+        ( _, Err error ) ->
+            if isPlaylistCommand command then
+                Just (failed error)
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+isPlaylistCommand : String -> Bool
+isPlaylistCommand command =
+    List.member command
+        [ "list_playlists"
+        , "create_playlist"
+        , "rename_playlist"
+        , "delete_playlist"
+        , "add_to_playlist"
+        , "set_rating"
+        ]
+
+
 subscriptions : Model -> Sub Msg
-subscriptions _ =
-    Ports.receive FromJs
+subscriptions model =
+    Sub.batch
+        [ Ports.receive FromJs
+
+        -- Only while a grip is held: a drag has to follow the pointer
+        -- outside the column it started in, and off the window entirely,
+        -- but nothing should listen for that the rest of the time.
+        , case model.dragging of
+            Just _ ->
+                Sub.batch
+                    [ Browser.Events.onMouseMove (Decode.map PointerMoved clientX)
+                    , Browser.Events.onMouseUp (Decode.succeed PointerReleased)
+                    ]
+
+            Nothing ->
+                Sub.none
+        ]
+
+
+clientX : Decode.Decoder Float
+clientX =
+    Decode.field "clientX" Decode.float
 
 
 
@@ -184,7 +540,7 @@ view model =
     in
     div [ class "app", attribute "data-theme" (modeAttribute mode) ]
         [ viewSidebar model
-        , viewMain
+        , viewMain model
         , viewPlayerBar model
         ]
 
@@ -225,7 +581,13 @@ viewPanel : Model -> Html Msg
 viewPanel model =
     case model.panel of
         Library ->
-            Html.map LibraryMsg (Library.view model.library)
+            -- An Int, not a Maybe: Html.Lazy compares by reference, and a
+            -- freshly built `Just` would never match.
+            Html.map LibraryMsg
+                (Library.view
+                    (activePlaylist model |> Maybe.map .id |> Maybe.withDefault 0)
+                    model.library
+                )
 
         NowPlaying ->
             placeholder "Now playing" "Cover art and lyrics for the current track."
@@ -242,16 +604,303 @@ placeholder heading body =
         ]
 
 
-viewMain : Html Msg
-viewMain =
+viewMain : Model -> Html Msg
+viewMain model =
+    let
+        open : Maybe Playlist.Playlist
+        open =
+            activePlaylist model
+    in
     main_ [ class "main" ]
         [ div [ class "tabs" ]
-            [ span [ class "tab is-active" ] [ text "Playlist 1" ] ]
-        , div [ class "main-content" ]
-            [ h1 [] [ text "Satsuma" ]
-            , p [] [ text "Open a playlist or add tracks from the library." ]
-            ]
+            (List.map (viewTab model open) model.playlists
+                ++ [ button
+                        [ type_ "button"
+                        , class "tab-add"
+                        , title "New playlist"
+                        , onClick NewPlaylist
+                        ]
+                        [ text "+" ]
+                   ]
+            )
+        , case open of
+            Nothing ->
+                div [ class "main-content" ]
+                    [ h1 [] [ text "Satsuma" ]
+                    , p [] [ text "Make a playlist, then add tracks to it from the library." ]
+                    ]
+
+            Just playlist ->
+                viewTable model playlist model.sortedTracks
+        , viewPlaylistError model.playlistError
         ]
+
+
+viewPlaylistError : Maybe String -> Html Msg
+viewPlaylistError error =
+    case error of
+        Just message ->
+            p [ class "error playlist-error" ] [ text message ]
+
+        Nothing ->
+            text ""
+
+
+renameFieldId : String
+renameFieldId =
+    "playlist-rename"
+
+
+viewTab : Model -> Maybe Playlist.Playlist -> Playlist.Playlist -> Html Msg
+viewTab model open playlist =
+    let
+        isOpen : Bool
+        isOpen =
+            Maybe.map .id open == Just playlist.id
+    in
+    case model.renaming of
+        Just ( id, name ) ->
+            if id == playlist.id then
+                input
+                    [ type_ "text"
+                    , Attr.id renameFieldId
+                    , class "tab-rename"
+                    , Attr.value name
+                    , Attr.attribute "aria-label" "Playlist name"
+                    , onInput EditRename
+                    , Html.Events.onBlur CommitRename
+                    , onEnterOrEscape CommitRename CancelRename
+                    ]
+                    []
+
+            else
+                tabButton isOpen playlist
+
+        Nothing ->
+            tabButton isOpen playlist
+
+
+tabButton : Bool -> Playlist.Playlist -> Html Msg
+tabButton isOpen playlist =
+    span [ classList [ ( "tab", True ), ( "is-active", isOpen ) ] ]
+        [ button
+            [ type_ "button"
+            , class "tab-label"
+            , title "Double-click to rename"
+            , onClick (SelectPlaylist playlist.id)
+            , onDoubleClick (StartRenaming playlist.id playlist.name)
+            ]
+            [ text playlist.name ]
+        , button
+            [ type_ "button"
+            , class "icon-button"
+            , title ("Delete " ++ playlist.name)
+            , onClick (DeletePlaylist playlist.id)
+            ]
+            [ text "✕" ]
+        ]
+
+
+{-| Commits on Enter and gives up on Escape, which is what a rename in
+place is expected to do.
+-}
+onEnterOrEscape : Msg -> Msg -> Html.Attribute Msg
+onEnterOrEscape commit cancel =
+    Html.Events.on "keydown"
+        (Decode.field "key" Decode.string
+            |> Decode.andThen
+                (\key ->
+                    case key of
+                        "Enter" ->
+                            Decode.succeed commit
+
+                        "Escape" ->
+                            Decode.succeed cancel
+
+                        _ ->
+                            Decode.fail "another key"
+                )
+        )
+
+
+viewTable : Model -> Playlist.Playlist -> List ( Int, Tree.Row ) -> Html Msg
+viewTable model playlist tracks =
+    div [ class "playlist" ]
+        [ Html.table [ class "playlist-table" ]
+            [ Html.thead []
+                [ Html.tr [] (List.map (viewHeading model) Playlist.columns) ]
+
+            -- The rows are the expensive part and the player reports its
+            -- position five times a second: redraw them only when the
+            -- tracks or the track being played change.
+            , Html.Lazy.lazy2 viewRows (playingId model) tracks
+            ]
+        , p [ class "playlist-footer" ]
+            [ text (Playlist.footerText playlist.tracks) ]
+        ]
+
+
+{-| The id of the track being played, or zero: a number, so the lazy node
+above can compare it.
+-}
+playingId : Model -> Int
+playingId model =
+    model.player.state.track |> Maybe.map .id |> Maybe.withDefault 0
+
+
+{-| Keyed on the place each row holds in the playlist: sorting a column
+reorders thousands of rows, and without a key the browser rewrites every
+cell of every one of them instead of moving the rows it already has.
+-}
+viewRows : Int -> List ( Int, Tree.Row ) -> Html Msg
+viewRows playing tracks =
+    Html.Keyed.node "tbody"
+        []
+        (List.map
+            (\( place, track ) -> ( String.fromInt place, viewRow playing track ))
+            tracks
+        )
+
+
+viewHeading : Model -> Column -> Html Msg
+viewHeading model column =
+    let
+        marker : String
+        marker =
+            case model.sort of
+                Just sort ->
+                    if sort.column == column then
+                        if sort.ascending then
+                            " ▲"
+
+                        else
+                            " ▼"
+
+                    else
+                        ""
+
+                Nothing ->
+                    ""
+    in
+    Html.th
+        [ Attr.style "width" (String.fromInt (widthOf model column) ++ "px")
+        , Attr.scope "col"
+        ]
+        [ button
+            [ type_ "button"
+            , class "column-heading"
+            , onClick (SortBy column)
+            ]
+            [ text (Playlist.columnLabel column ++ marker) ]
+        , span
+            [ class "column-grip"
+            , title "Drag to resize"
+            , Attr.attribute "role" "separator"
+            , onGrab column
+            ]
+            []
+        ]
+
+
+widthOf : Model -> Column -> Int
+widthOf model column =
+    Dict.get (Playlist.columnLabel column) model.widths
+        |> Maybe.withDefault (Playlist.defaultWidth column)
+
+
+{-| Takes hold of a column. The pointer is followed from `subscriptions`
+until it is let go, because a drag leaves the grip almost at once.
+
+The default is prevented so that dragging selects the heading text
+instead of resizing the column.
+
+-}
+onGrab : Column -> Html.Attribute Msg
+onGrab column =
+    Html.Events.preventDefaultOn "mousedown"
+        (Decode.map (\x -> ( GripPressed column x, True )) clientX)
+
+
+{-| The narrowest a column may be dragged: past this the heading and its
+grip are gone and there is nothing left to drag back.
+-}
+minimumWidth : Int
+minimumWidth =
+    40
+
+
+viewRow : Int -> Tree.Row -> Html Msg
+viewRow playing track =
+    Html.tr
+        [ classList [ ( "playlist-row", True ), ( "is-playing", playing == track.id ) ]
+        , onDoubleClick (PlayFrom track.id)
+        ]
+        (List.map (viewCell track) Playlist.columns)
+
+
+viewCell : Tree.Row -> Column -> Html Msg
+viewCell track column =
+    case column of
+        Playlist.Rating ->
+            Html.td [ class "cell-rating" ] [ viewStars track ]
+
+        _ ->
+            let
+                content : String
+                content =
+                    Playlist.cellText column track
+            in
+            Html.td [ title content ] [ text content ]
+
+
+{-| Five stars, each of them a button: clicking one rates the track, and
+clicking the one already set takes the rating off.
+-}
+viewStars : Tree.Row -> Html Msg
+viewStars track =
+    let
+        current : Int
+        current =
+            Maybe.withDefault 0 track.rating
+
+        star : Int -> Html Msg
+        star n =
+            button
+                [ type_ "button"
+                , classList [ ( "star", True ), ( "is-set", n <= current ) ]
+                , title
+                    (if n == current then
+                        "Remove the rating"
+
+                     else
+                        String.fromInt n
+                            ++ (if n == 1 then
+                                    " star"
+
+                                else
+                                    " stars"
+                               )
+                    )
+                , onClick
+                    (Rate track.id
+                        (if n == current then
+                            Nothing
+
+                         else
+                            Just n
+                        )
+                    )
+                ]
+                [ text
+                    (if n <= current then
+                        "★"
+
+                     else
+                        "☆"
+                    )
+                ]
+    in
+    span [ class "stars" ] (List.map star [ 1, 2, 3, 4, 5 ])
 
 
 viewPlayerBar : Model -> Html Msg

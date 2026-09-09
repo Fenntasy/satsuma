@@ -3,8 +3,10 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lofty::file::TaggedFileExt;
-use lofty::prelude::{Accessor, AudioFile, ItemKey};
+use lofty::config::WriteOptions;
+use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::prelude::{Accessor, ItemKey};
+use lofty::tag::items::popularimeter::{Popularimeter, StarRating};
 use lofty::tag::Tag;
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +39,75 @@ pub struct TrackTags {
     pub has_embedded_cover: bool,
 }
 
+/// Writes a star rating into the file, so the rating lives with the music
+/// rather than only in the cache.
+///
+/// `stars` is 1 to 5, or `None` to remove the rating. In an `ID3v2` tag it
+/// is a `POPM` frame in the Windows Media Player spelling, which is what
+/// Strawberry and most taggers read; other tag formats write it their own
+/// way. A tag that cannot hold a rating at all is refused rather than
+/// silently left unrated.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or written.
+pub fn write_rating(path: &Path, stars: Option<u8>) -> Result<(), TagError> {
+    let mut tagged = lofty::read_from_path(path).map_err(|source| TagError::Read {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let tag_type = tagged.primary_tag_type();
+    if tagged.primary_tag_mut().is_none() {
+        tagged.insert_tag(Tag::new(tag_type));
+    }
+    let tag = tagged.primary_tag_mut().ok_or_else(|| TagError::Write {
+        path: path.display().to_string(),
+        message: "the file holds no tag that could be written".to_owned(),
+    })?;
+
+    let stars = match stars {
+        Some(stars) => Some(star_rating(stars).ok_or_else(|| TagError::Write {
+            path: path.display().to_string(),
+            message: format!("a rating is one to five stars, not {stars}"),
+        })?),
+        None => None,
+    };
+    match stars {
+        Some(rating) => {
+            let popularimeter = Popularimeter::windows_media_player(rating, 0);
+            // The answer says whether this kind of tag can hold a rating at
+            // all; ignoring it would report success having written nothing.
+            if !tag.insert_text(ItemKey::Popularimeter, popularimeter.to_string()) {
+                return Err(TagError::Write {
+                    path: path.display().to_string(),
+                    message: format!("{tag_type:?} tags cannot hold a rating"),
+                });
+            }
+        }
+        None => {
+            tag.remove_key(ItemKey::Popularimeter);
+        }
+    }
+
+    tagged
+        .save_to_path(path, WriteOptions::default())
+        .map_err(|err| TagError::Write {
+            path: path.display().to_string(),
+            message: causes(&err),
+        })
+}
+
+fn star_rating(stars: u8) -> Option<StarRating> {
+    match stars {
+        1 => Some(StarRating::One),
+        2 => Some(StarRating::Two),
+        3 => Some(StarRating::Three),
+        4 => Some(StarRating::Four),
+        5 => Some(StarRating::Five),
+        _ => None,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TagError {
     #[error("cannot read {path}: {}", causes(.source))]
@@ -45,6 +116,8 @@ pub enum TagError {
         #[source]
         source: lofty::error::FileParseError,
     },
+    #[error("cannot write {path}: {message}")]
+    Write { path: String, message: String },
 }
 
 /// The whole cause chain of an error, so the log says what actually went
@@ -127,7 +200,7 @@ pub(crate) mod tests {
     use lofty::tag::items::Timestamp;
     use lofty::tag::{Tag, TagType};
 
-    use super::{is_audio_file, read_tags};
+    use super::{is_audio_file, read_tags, TagError};
     use crate::grouping::{Grouping, Kind, Vibe, Volume};
 
     pub(crate) const FIXTURE: &str =
@@ -238,7 +311,96 @@ pub(crate) mod tests {
 
     #[test]
     fn unreadable_path_is_an_error() {
-        assert!(read_tags(Path::new("/definitely/missing.mp3")).is_err());
+        let error = read_tags(Path::new("/definitely/missing.mp3")).unwrap_err();
+        // The path has to be in the message: "cannot read tags" alone tells
+        // nobody which file of a library-wide scan went wrong.
+        assert!(
+            matches!(&error, TagError::Read { path, .. } if path == "/definitely/missing.mp3"),
+            "expected a read error naming the file, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_rating_is_written_into_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = tagged_copy(dir.path(), "rated.mp3", &sample_tag());
+
+        super::write_rating(&path, Some(2)).expect("write");
+        assert_eq!(read_tags(&path).expect("read").rating, Some(2));
+
+        super::write_rating(&path, Some(5)).expect("write");
+        assert_eq!(read_tags(&path).expect("read").rating, Some(5));
+    }
+
+    #[test]
+    fn a_rating_round_trips_through_a_flac_too() {
+        // Every other rating test uses an MP3, so nothing would notice a
+        // format that stores ratings another way.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("silence.flac");
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/silence.flac"),
+            &path,
+        )
+        .expect("copy");
+
+        super::write_rating(&path, Some(3)).expect("write");
+        assert_eq!(
+            read_tags(&path).expect("read").rating,
+            Some(3),
+            "the rating must survive in a format that is not ID3"
+        );
+
+        super::write_rating(&path, None).expect("write");
+        assert_eq!(read_tags(&path).expect("read").rating, None);
+    }
+
+    #[test]
+    fn a_rating_can_be_taken_off_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = tagged_copy(dir.path(), "rated.mp3", &sample_tag());
+        super::write_rating(&path, Some(3)).expect("write");
+        super::write_rating(&path, None).expect("write");
+        assert_eq!(read_tags(&path).expect("read").rating, None);
+    }
+
+    #[test]
+    fn a_rating_can_be_written_to_a_file_with_no_tag_yet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bare.mp3");
+        std::fs::copy(FIXTURE, &path).expect("copy");
+        super::write_rating(&path, Some(4)).expect("write");
+        assert_eq!(read_tags(&path).expect("read").rating, Some(4));
+    }
+
+    #[test]
+    fn writing_a_rating_leaves_the_other_tags_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = tagged_copy(dir.path(), "rated.mp3", &sample_tag());
+        super::write_rating(&path, Some(1)).expect("write");
+        let tags = read_tags(&path).expect("read");
+        assert_eq!(tags.title.as_deref(), Some("Orange Sun"));
+        assert_eq!(tags.grouping_raw.as_deref(), Some("Chant / Loud / Happy"));
+    }
+
+    #[test]
+    fn an_impossible_rating_is_refused_rather_than_clearing_the_one_there() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = tagged_copy(dir.path(), "rated.mp3", &sample_tag());
+        super::write_rating(&path, Some(3)).expect("write");
+
+        assert!(super::write_rating(&path, Some(9)).is_err());
+        assert!(super::write_rating(&path, Some(0)).is_err());
+        assert_eq!(
+            read_tags(&path).expect("read").rating,
+            Some(3),
+            "a refused write must leave the rating alone"
+        );
+    }
+
+    #[test]
+    fn writing_to_a_missing_file_is_an_error() {
+        assert!(super::write_rating(Path::new("/definitely/missing.mp3"), Some(3)).is_err());
     }
 
     #[test]

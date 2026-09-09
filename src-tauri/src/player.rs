@@ -466,7 +466,7 @@ impl Handle {
     pub fn send(&self, command: Command) -> Result<(), String> {
         self.commands
             .send(command)
-            .map_err(|_| "the player stopped".to_owned())
+            .map_err(|err| format!("the player stopped ({err})"))
     }
 }
 

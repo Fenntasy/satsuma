@@ -17,18 +17,25 @@ const ROWS = [
   row(3, "Rock", "Beta", "Second", "Three", 1),
 ];
 
-function row(id, genre, artist, album, title, trackNumber) {
+function row(id, genre, artist, album, title, trackNumber, overrides = {}) {
   return {
     id,
+    path: `/music/${id}.mp3`,
     genre,
     artist,
     album,
     title,
     track_number: trackNumber,
     disc_number: 1,
+    rating: null,
+    grouping: null,
     duration_ms: 60000,
+    ...overrides,
   };
 }
+
+/** One playlist holding the two Indie tracks. */
+const PLAYLISTS = [{ id: 1, name: "Favourites", tracks: [ROWS[0], ROWS[1]] }];
 
 function playerState(overrides = {}) {
   return {
@@ -57,6 +64,7 @@ async function open(page) {
     list_folders: FOLDERS,
     library_stats: STATS,
     library_rows: ROWS,
+    list_playlists: [],
   });
   await page.goto("/");
   await expect(page.getByText("3 tracks")).toBeVisible();
@@ -65,6 +73,19 @@ async function open(page) {
 /** The commands the app has sent so far. */
 function calls(page) {
   return page.evaluate(() => window.__SATSUMA_TEST__.calls());
+}
+
+/** Loads the app with a playlist already there and open. */
+async function openWithPlaylist(page, playlists = PLAYLISTS) {
+  await page.addInitScript(installTauriStub, {
+    ping: "satsuma test",
+    list_folders: FOLDERS,
+    library_stats: STATS,
+    library_rows: ROWS,
+    list_playlists: playlists,
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: playlists[0].name })).toBeVisible();
 }
 
 /** Forgets the commands sent so far, so the next assertion starts clean. */
@@ -102,6 +123,7 @@ test("asks for the library and the player state on startup", async ({ page }) =>
       "library_rows",
       "library_stats",
       "list_folders",
+      "list_playlists",
       "ping",
       "player_state",
       "start_scan",
@@ -544,6 +566,304 @@ test("the theme toggle cycles and survives a reload", async ({ page }) => {
 
   await page.reload();
   await expect(page.getByRole("button", { name: "Theme: Dark" })).toBeVisible();
+});
+
+test("a playlist shows its tracks in the columns the requirements ask for", async ({
+  page,
+}) => {
+  await openWithPlaylist(page);
+  const headings = page.locator("th");
+  await expect(headings).toHaveText([
+    "Genre",
+    "Artist",
+    "Track",
+    "Title",
+    "Album",
+    "Duration",
+    "Rating",
+    "Grouping",
+  ]);
+  await expect(page.locator(".playlist-row")).toHaveCount(2);
+  await expect(page.getByText("2 tracks [2:00]")).toBeVisible();
+});
+
+test("without a playlist the panel says what to do", async ({ page }) => {
+  await open(page);
+  await expect(
+    page.getByText("Make a playlist, then add tracks to it from the library."),
+  ).toBeVisible();
+});
+
+test("a new playlist is created and opened", async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => window.__SATSUMA_TEST__.reply("create_playlist", 3));
+  await clearCalls(page);
+  await page.getByTitle("New playlist").click();
+  await expect
+    .poll(() => calls(page))
+    .toContainEqual({ command: "create_playlist", args: { name: "Playlist 1" } });
+});
+
+test("a tab is renamed by double-clicking it", async ({ page }) => {
+  await openWithPlaylist(page);
+  await page.getByRole("button", { name: "Favourites" }).dblclick();
+  const field = page.getByLabel("Playlist name");
+  await expect(field).toBeVisible();
+  // Typing must work straight away, without clicking the field first.
+  await expect(field).toBeFocused();
+  await field.fill("Loud ones");
+  await clearCalls(page);
+  await field.press("Enter");
+  await expect
+    .poll(() => calls(page))
+    .toContainEqual({ command: "rename_playlist", args: { id: 1, name: "Loud ones" } });
+});
+
+test("escape gives up on a rename", async ({ page }) => {
+  await openWithPlaylist(page);
+  await page.getByRole("button", { name: "Favourites" }).dblclick();
+  await clearCalls(page);
+  await page.getByLabel("Playlist name").press("Escape");
+  await expect(page.getByRole("button", { name: "Favourites" })).toBeVisible();
+  expect(await calls(page)).toEqual([]);
+});
+
+test("deleting a background tab leaves the open one alone", async ({ page }) => {
+  const two = [
+    { id: 1, name: "First", tracks: [ROWS[0]] },
+    { id: 2, name: "Second", tracks: [ROWS[1]] },
+  ];
+  await openWithPlaylist(page, two);
+  await page.getByRole("button", { name: "Second" }).click();
+  await expect(page.locator(".playlist-row")).toHaveCount(1);
+
+  await page.evaluate(() =>
+    window.__SATSUMA_TEST__.reply("list_playlists", [
+      { id: 2, name: "Second", tracks: [] },
+    ]),
+  );
+  await page.getByTitle("Delete First").click();
+  // Still on Second, which now shows as empty, rather than jumping away.
+  await expect(page.getByRole("button", { name: "Second" })).toBeVisible();
+  await expect(page.locator(".playlist-row")).toHaveCount(0);
+});
+
+test("deleting the open tab does not show its tracks under another", async ({
+  page,
+}) => {
+  const two = [
+    { id: 1, name: "First", tracks: [ROWS[0]] },
+    { id: 2, name: "Second", tracks: [ROWS[0], ROWS[1]] },
+  ];
+  await openWithPlaylist(page, two);
+  await page.getByRole("button", { name: "Second" }).click();
+  await expect(page.locator(".playlist-row")).toHaveCount(2);
+
+  // What the backend answers with once the delete lands. The rows of the
+  // playlist just deleted must never show under First, neither while the
+  // reply is in flight nor after it.
+  await page.evaluate(
+    (remaining) => window.__SATSUMA_TEST__.reply("list_playlists", remaining),
+    [{ id: 1, name: "First", tracks: [ROWS[0]] }],
+  );
+  await page.getByTitle("Delete Second").click();
+  await expect(page.getByRole("button", { name: "First" })).toBeVisible();
+  await expect(page.locator(".playlist-row")).toHaveCount(1);
+});
+
+test("a failed reload does not ask for another one", async ({ page }) => {
+  // Answering a failed reload with another reload would never stop.
+  await page.addInitScript(installTauriStub, { ping: "satsuma test" });
+  await page.goto("/");
+  await page.evaluate(() =>
+    window.__SATSUMA_TEST__.failWith("list_playlists", "the settings cannot be read"),
+  );
+  await clearCalls(page);
+  await page.getByTitle("New playlist").click();
+
+  await expect(page.getByText("the settings cannot be read")).toBeVisible();
+  await page.waitForTimeout(300);
+  const reloads = (await calls(page)).filter((call) => call.command === "list_playlists");
+  expect(reloads.length).toBeLessThan(3);
+});
+
+test("a playlist command that fails puts the tab back", async ({ page }) => {
+  await openWithPlaylist(page, [
+    { id: 1, name: "First", tracks: [ROWS[0]] },
+    { id: 2, name: "Second", tracks: [ROWS[1]] },
+  ]);
+  await page.getByRole("button", { name: "Second" }).click();
+  await page.evaluate(() =>
+    window.__SATSUMA_TEST__.failWith("delete_playlist", "that playlist is not there any more"),
+  );
+
+  await page.getByTitle("Delete Second").click();
+  await expect(page.getByText("that playlist is not there any more")).toBeVisible();
+  // The backend refused, so the tab must still be there.
+  await expect(page.getByRole("button", { name: "Second" })).toBeVisible();
+});
+
+test("a refused delete leaves the user on the playlist they were reading", async ({
+  page,
+}) => {
+  // The tab coming back is not enough: being moved to First and shown its
+  // rows says the delete worked, which is the opposite of what happened.
+  await openWithPlaylist(page, [
+    { id: 1, name: "First", tracks: [ROWS[0]] },
+    { id: 2, name: "Second", tracks: [ROWS[1], ROWS[2]] },
+  ]);
+  await page.getByRole("button", { name: "Second" }).click();
+  await page.getByRole("button", { name: "Title" }).click();
+  const titles = page.locator(".playlist-row td:nth-child(4)");
+  await expect(titles).toHaveText(["Three", "Two"]);
+
+  await page.evaluate(() =>
+    window.__SATSUMA_TEST__.failWith("delete_playlist", "that playlist is not there any more"),
+  );
+  await page.getByTitle("Delete Second").click();
+  await expect(page.getByText("that playlist is not there any more")).toBeVisible();
+
+  await expect(page.locator(".tab.is-active")).toHaveText(/Second/);
+  // Second's own rows, still in the order the user put them in.
+  await expect(titles).toHaveText(["Three", "Two"]);
+});
+
+test("a playlist is deleted", async ({ page }) => {
+  await openWithPlaylist(page);
+  await clearCalls(page);
+  await page.getByTitle("Delete Favourites").click();
+  await expect
+    .poll(() => calls(page))
+    .toContainEqual({ command: "delete_playlist", args: { id: 1 } });
+});
+
+test("clicking a heading sorts, then reverses, then gives the order back", async ({
+  page,
+}) => {
+  const unsorted = [
+    { id: 1, name: "Mixed", tracks: [row(2, "Rock", "Zed", "Later", "Beta", 2), row(1, "Indie", "Alpha", "First", "Alpha", 1)] },
+  ];
+  await openWithPlaylist(page, unsorted);
+  const titles = page.locator(".playlist-row td:nth-child(4)");
+  await expect(titles).toHaveText(["Beta", "Alpha"]);
+
+  await page.getByRole("button", { name: "Title" }).click();
+  await expect(titles).toHaveText(["Alpha", "Beta"]);
+
+  await page.getByRole("button", { name: /^Title/ }).click();
+  await expect(titles).toHaveText(["Beta", "Alpha"]);
+
+  await page.getByRole("button", { name: /^Title/ }).click();
+  await expect(titles).toHaveText(["Beta", "Alpha"]);
+});
+
+test("clicking a star rates the track and clicking it again clears it", async ({
+  page,
+}) => {
+  const rated = [
+    { id: 1, name: "Rated", tracks: [row(1, "Indie", "Alpha", "First", "One", 1, { rating: 3 })] },
+  ];
+  await openWithPlaylist(page, rated);
+  await clearCalls(page);
+
+  await page.getByTitle("4 stars").click();
+  await expect
+    .poll(() => calls(page))
+    .toContainEqual({ command: "set_rating", args: { id: 1, stars: 4 } });
+
+  await clearCalls(page);
+  await page.getByTitle("Remove the rating").click();
+  await expect
+    .poll(() => calls(page))
+    .toContainEqual({ command: "set_rating", args: { id: 1, stars: null } });
+});
+
+test("double-clicking a row plays the playlist from it", async ({ page }) => {
+  await openWithPlaylist(page);
+  await clearCalls(page);
+  await page.locator(".playlist-row").nth(1).dblclick();
+  await expect
+    .poll(() => calls(page))
+    .toContainEqual({ command: "play_tracks", args: { ids: [1, 2], startId: 2 } });
+});
+
+test("the track that is playing stands out", async ({ page }) => {
+  await openWithPlaylist(page);
+  await emit(
+    page,
+    "player://state",
+    playerState({
+      status: "playing",
+      track: { id: 2, title: "Two", artist: null, album: null, duration_ms: 60000 },
+    }),
+  );
+  await expect(page.locator(".playlist-row.is-playing")).toHaveCount(1);
+});
+
+test("the library adds to the open playlist", async ({ page }) => {
+  await openWithPlaylist(page);
+  await clearCalls(page);
+  await page.getByTitle("Add Indie to the playlist").click();
+  await expect
+    .poll(() => calls(page))
+    .toContainEqual({ command: "add_to_playlist", args: { id: 1, ids: [1, 2] } });
+});
+
+test("the library can still queue while a playlist is open", async ({ page }) => {
+  await openWithPlaylist(page);
+  await clearCalls(page);
+  await page.getByTitle("Add Indie to the queue").click();
+  await expect
+    .poll(() => calls(page))
+    .toContainEqual({ command: "enqueue_tracks", args: { ids: [1, 2] } });
+});
+
+test("with no playlist only the queue button is offered", async ({ page }) => {
+  await open(page);
+  await expect(page.getByTitle("Add Indie to the queue")).toBeVisible();
+  await expect(page.getByTitle("Add Indie to the playlist")).toHaveCount(0);
+  await clearCalls(page);
+  await page.getByTitle("Add Indie to the queue").click();
+  await expect
+    .poll(() => calls(page))
+    .toContainEqual({ command: "enqueue_tracks", args: { ids: [1, 2] } });
+});
+
+test("a column is resized by dragging its grip", async ({ page }) => {
+  await openWithPlaylist(page);
+  const heading = page.locator("th").first();
+  const before = await heading.evaluate((element) => element.getBoundingClientRect().width);
+
+  const grip = heading.locator(".column-grip");
+  const box = await grip.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2, { steps: 6 });
+  await page.mouse.up();
+
+  const after = await heading.evaluate((element) => element.getBoundingClientRect().width);
+  expect(after).toBeGreaterThan(before + 30);
+});
+
+test("a resized column is still that wide after a reload", async ({ page }) => {
+  // The width goes out through `saveWidths` and comes back as a flag, and
+  // the two halves are named separately on each side of the bridge. A
+  // typo in either, or a key shape that does not match, degrades to no
+  // saved widths with no error: only a reload notices.
+  await openWithPlaylist(page);
+  const heading = () => page.locator("th").first();
+  const grip = heading().locator(".column-grip");
+  const box = await grip.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2, { steps: 6 });
+  await page.mouse.up();
+  const dragged = await heading().evaluate((element) => element.getBoundingClientRect().width);
+
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Favourites" })).toBeVisible();
+  const reloaded = await heading().evaluate((element) => element.getBoundingClientRect().width);
+  expect(Math.abs(reloaded - dragged)).toBeLessThan(2);
 });
 
 test("the panels switch", async ({ page }) => {

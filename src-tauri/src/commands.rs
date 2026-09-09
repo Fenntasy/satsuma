@@ -1,5 +1,6 @@
 //! Tauri commands exposed to the frontend.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -67,10 +68,17 @@ fn lock_status(status: &Mutex<ScanStatus>) -> MutexGuard<'_, ScanStatus> {
 }
 
 /// Shared application state managed by Tauri.
+#[derive(Debug)]
 pub struct AppState {
-    pub db: Mutex<Db>,
+    /// Not `pub`: the lock is the scanner's business, which needs to let go
+    /// of it between batches. Everything else goes through [`Self::with_db`].
+    pub(crate) db: Mutex<Db>,
     scan: Arc<Mutex<ScanStatus>>,
     settings_path: PathBuf,
+    /// Held across reading, changing and writing the settings file: the
+    /// commands run on a thread pool and would otherwise lose each other's
+    /// changes.
+    settings_lock: Mutex<()>,
     player: Handle,
 }
 
@@ -81,6 +89,7 @@ impl AppState {
             db: Mutex::new(db),
             scan: Arc::new(Mutex::new(ScanStatus::default())),
             settings_path,
+            settings_lock: Mutex::new(()),
             player,
         }
     }
@@ -95,12 +104,31 @@ impl AppState {
                 return;
             }
         };
-        let settings = settings::Settings {
-            folders: folders.into_iter().map(|folder| folder.path).collect(),
-        };
-        if let Err(err) = settings::write(&self.settings_path, &settings) {
+        if let Err(err) = self.update_settings(|settings| {
+            settings.folders = folders.into_iter().map(|folder| folder.path).collect();
+        }) {
             log::warn!("cannot save the library folders ({err})");
         }
+    }
+
+    /// What the settings file holds today.
+    fn settings(&self) -> Result<settings::Settings, String> {
+        settings::load(&self.settings_path)
+    }
+
+    /// Changes the settings file, keeping everything `change` does not
+    /// touch: writing a whole `Settings` built from one part would drop the
+    /// others.
+    fn update_settings(&self, change: impl FnOnce(&mut settings::Settings)) -> Result<(), String> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Read first: writing on top of a file that cannot be parsed would
+        // throw away the playlists it holds.
+        let mut settings = self.settings()?;
+        change(&mut settings);
+        settings::write(&self.settings_path, &settings).map_err(|err| err.to_string())
     }
 
     /// Runs `f` against the library cache. A poisoned lock is recovered: a
@@ -131,7 +159,10 @@ pub fn ping() -> String {
 ///
 /// Returns a message when the database cannot be read.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn list_folders(state: State<'_, AppState>) -> Result<Vec<Folder>, String> {
     state.with_db(Db::list_folders)
 }
@@ -141,7 +172,10 @@ pub fn list_folders(state: State<'_, AppState>) -> Result<Vec<Folder>, String> {
 /// Returns a message when the folder is already in the library or the
 /// database cannot be written.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn add_folder(state: State<'_, AppState>, path: String) -> Result<Folder, String> {
     let folder = state.with_db(|db| db.add_folder(&path))?;
     state.remember_folders();
@@ -152,7 +186,10 @@ pub fn add_folder(state: State<'_, AppState>, path: String) -> Result<Folder, St
 ///
 /// Returns a message when the database cannot be written.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn remove_folder(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     state.with_db(|db| db.remove_folder(id))?;
     state.remember_folders();
@@ -163,7 +200,10 @@ pub fn remove_folder(state: State<'_, AppState>, id: i64) -> Result<(), String> 
 ///
 /// Returns a message when the database cannot be read.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn library_stats(state: State<'_, AppState>) -> Result<LibraryStats, String> {
     state.with_db(Db::stats)
 }
@@ -189,7 +229,10 @@ pub async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
 /// When a scan is already running, another pass is queued instead: folders
 /// added meanwhile are picked up as soon as the current pass ends.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn start_scan(app: AppHandle, state: State<'_, AppState>) {
     let scan = Arc::clone(&state.scan);
     if !lock_status(&scan).claim() {
@@ -273,13 +316,231 @@ fn scan_once(app: &AppHandle, state: &State<'_, AppState>) -> ScanOutcome {
 
 // PLAYER
 
+/// Turns "nothing matched that id" into an error: a change that quietly
+/// did nothing looks exactly like one that worked.
+fn missing_unless(found: bool) -> Result<(), String> {
+    if found {
+        Ok(())
+    } else {
+        Err("that playlist is not there any more".to_owned())
+    }
+}
+
+/// A playlist name with the spaces around it removed.
+///
+/// # Errors
+///
+/// Returns a message when nothing is left of it: a tab with no label
+/// cannot be clicked, and only deleting it would get rid of it.
+fn check_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a playlist needs a name".to_owned());
+    }
+    Ok(name.to_owned())
+}
+
+/// An id no playlist holds. Taken past the highest rather than from the
+/// count, so deleting one and adding another cannot collide.
+fn next_playlist_id(playlists: &[settings::Playlist]) -> u32 {
+    playlists
+        .iter()
+        .map(|playlist| playlist.id)
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+/// A playlist as the frontend shows it: its tracks resolved against the
+/// library, so a file that left it simply disappears from the list.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PlaylistView {
+    pub id: u32,
+    pub name: String,
+    pub tracks: Vec<LibraryRow>,
+}
+
+/// The playlists, with their tracks looked up in the library.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
+pub fn list_playlists(state: State<'_, AppState>) -> Result<Vec<PlaylistView>, String> {
+    let saved = state.settings()?.playlists;
+    let rows = state.with_db(Db::library_rows)?;
+    Ok(resolve_playlists(saved, &rows))
+}
+
+/// Looks the stored paths up in the library, keeping the order the playlist
+/// has. A path the library does not know is dropped: the file left, and the
+/// playlist is not the place to say so.
+fn resolve_playlists(saved: Vec<settings::Playlist>, rows: &[LibraryRow]) -> Vec<PlaylistView> {
+    let by_path: HashMap<&str, &LibraryRow> =
+        rows.iter().map(|row| (row.path.as_str(), row)).collect();
+    saved
+        .into_iter()
+        .map(|playlist| PlaylistView {
+            id: playlist.id,
+            name: playlist.name,
+            tracks: playlist
+                .tracks
+                .iter()
+                .filter_map(|path| by_path.get(path.as_str()).map(|row| (*row).clone()))
+                .collect(),
+        })
+        .collect()
+}
+
+/// Adds a playlist and answers with its id.
+///
+/// # Errors
+///
+/// Returns a message when the name is empty, or when the settings cannot
+/// be written.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
+pub fn create_playlist(state: State<'_, AppState>, name: String) -> Result<u32, String> {
+    create(&state, &name)
+}
+
+fn create(state: &AppState, name: &str) -> Result<u32, String> {
+    let name = check_name(name)?;
+    let mut id = 0;
+    state.update_settings(|settings| {
+        id = next_playlist_id(&settings.playlists);
+        settings.playlists.push(settings::Playlist {
+            id,
+            name: name.clone(),
+            tracks: Vec::new(),
+        });
+    })?;
+    Ok(id)
+}
+
+/// # Errors
+///
+/// Returns a message when the name is empty, when no playlist has that id,
+/// or when the settings cannot be written.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
+pub fn rename_playlist(state: State<'_, AppState>, id: u32, name: String) -> Result<(), String> {
+    rename(&state, id, &name)
+}
+
+fn rename(state: &AppState, id: u32, name: &str) -> Result<(), String> {
+    let name = check_name(name)?;
+    let mut found = false;
+    state.update_settings(|settings| {
+        if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
+            playlist.name = name;
+            found = true;
+        }
+    })?;
+    missing_unless(found)
+}
+
+/// # Errors
+///
+/// Returns a message when no playlist has that id, or when the settings
+/// cannot be written.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
+pub fn delete_playlist(state: State<'_, AppState>, id: u32) -> Result<(), String> {
+    delete(&state, id)
+}
+
+fn delete(state: &AppState, id: u32) -> Result<(), String> {
+    let mut found = false;
+    state.update_settings(|settings| {
+        found = settings.playlists.iter().any(|playlist| playlist.id == id);
+        settings.playlists.retain(|playlist| playlist.id != id);
+    })?;
+    missing_unless(found)
+}
+
+/// Adds tracks at the end of a playlist.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read, when no playlist has
+/// that id, or when the settings cannot be written.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
+pub fn add_to_playlist(state: State<'_, AppState>, id: u32, ids: Vec<i64>) -> Result<(), String> {
+    add_tracks(&state, id, &ids)
+}
+
+fn add_tracks(state: &AppState, id: u32, ids: &[i64]) -> Result<(), String> {
+    let tracks = state.with_db(|db| db.tracks_by_ids(ids))?;
+    let mut found = false;
+    state.update_settings(|settings| {
+        if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
+            playlist
+                .tracks
+                .extend(tracks.iter().map(|track| track.path.clone()));
+            found = true;
+        }
+    })?;
+    missing_unless(found)
+}
+
+/// Rates a track, writing the stars into the file first so the music keeps
+/// the rating, then into the cache.
+///
+/// # Errors
+///
+/// Returns a message when the track is unknown or the file cannot be
+/// written.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
+pub fn set_rating(state: State<'_, AppState>, id: i64, stars: Option<u8>) -> Result<(), String> {
+    // Checked here rather than trusted: the file would quietly lose its
+    // rating while the cache kept the impossible number.
+    if let Some(stars) = stars {
+        if !(1..=5).contains(&stars) {
+            return Err(format!("a rating is one to five stars, not {stars}"));
+        }
+    }
+    let track = state
+        .with_db(|db| db.tracks_by_ids(&[id]))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "that track is not in the library any more".to_owned())?;
+    crate::tags::write_rating(std::path::Path::new(&track.path), stars)
+        .map_err(|err| err.to_string())?;
+    state.with_db(|db| db.set_rating(id, stars))
+}
+
 /// Everything the library tree groups by, for every track.
 ///
 /// # Errors
 ///
 /// Returns a message when the library cannot be read.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn library_rows(state: State<'_, AppState>) -> Result<Vec<LibraryRow>, String> {
     state.with_db(Db::library_rows)
 }
@@ -294,7 +555,10 @@ pub fn library_rows(state: State<'_, AppState>) -> Result<Vec<LibraryRow>, Strin
 ///
 /// Returns a message when the library cannot be read or the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn play_tracks(
     state: State<'_, AppState>,
     ids: Vec<i64>,
@@ -316,7 +580,10 @@ pub fn play_tracks(
 ///
 /// Returns a message when the library cannot be read or the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn enqueue_tracks(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
     let tracks = state.with_db(|db| db.tracks_by_ids(&ids))?;
     if tracks.is_empty() {
@@ -331,7 +598,10 @@ pub fn enqueue_tracks(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), S
 ///
 /// Returns a message when the library cannot be read or the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn play_library(state: State<'_, AppState>) -> Result<(), String> {
     let tracks = state.with_db(|db| db.list_tracks(None))?;
     if tracks.is_empty() {
@@ -349,7 +619,10 @@ pub fn play_library(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_state(state: State<'_, AppState>) -> Result<(), String> {
     state.player.send(player::Command::ReportState)
 }
@@ -358,7 +631,10 @@ pub fn player_state(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_play_pause(state: State<'_, AppState>) -> Result<(), String> {
     state.player.send(player::Command::PlayPause)
 }
@@ -367,7 +643,10 @@ pub fn player_play_pause(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_stop(state: State<'_, AppState>) -> Result<(), String> {
     state.player.send(player::Command::Stop)
 }
@@ -376,7 +655,10 @@ pub fn player_stop(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_next(state: State<'_, AppState>) -> Result<(), String> {
     state.player.send(player::Command::Next)
 }
@@ -385,7 +667,10 @@ pub fn player_next(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_previous(state: State<'_, AppState>) -> Result<(), String> {
     state.player.send(player::Command::Previous)
 }
@@ -394,7 +679,10 @@ pub fn player_previous(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_seek(state: State<'_, AppState>, position_ms: u64) -> Result<(), String> {
     state
         .player
@@ -405,7 +693,10 @@ pub fn player_seek(state: State<'_, AppState>, position_ms: u64) -> Result<(), S
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), String> {
     state.player.send(player::Command::SetVolume(volume))
 }
@@ -414,7 +705,10 @@ pub fn player_set_volume(state: State<'_, AppState>, volume: f32) -> Result<(), 
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_set_shuffle(state: State<'_, AppState>, shuffle: bool) -> Result<(), String> {
     state.player.send(player::Command::SetShuffle(shuffle))
 }
@@ -423,7 +717,10 @@ pub fn player_set_shuffle(state: State<'_, AppState>, shuffle: bool) -> Result<(
 ///
 /// Returns a message when the repeat mode is unknown or the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_set_repeat(state: State<'_, AppState>, repeat: String) -> Result<(), String> {
     let repeat = match repeat.as_str() {
         "off" => Repeat::Off,
@@ -440,7 +737,10 @@ pub fn player_set_repeat(state: State<'_, AppState>, repeat: String) -> Result<(
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_play_next(state: State<'_, AppState>, index: usize) -> Result<(), String> {
     state.player.send(player::Command::PlayNext(index))
 }
@@ -451,7 +751,10 @@ pub fn player_play_next(state: State<'_, AppState>, index: usize) -> Result<(), 
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_jump_to(state: State<'_, AppState>, index: usize) -> Result<(), String> {
     state.player.send(player::Command::JumpTo(index))
 }
@@ -462,7 +765,10 @@ pub fn player_jump_to(state: State<'_, AppState>, index: usize) -> Result<(), St
 ///
 /// Returns a message when the library cannot be read or the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn enqueue_library(state: State<'_, AppState>) -> Result<(), String> {
     let tracks = state.with_db(|db| db.list_tracks(None))?;
     if tracks.is_empty() {
@@ -475,7 +781,10 @@ pub fn enqueue_library(state: State<'_, AppState>) -> Result<(), String> {
 ///
 /// Returns a message when the player stopped.
 #[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
 pub fn player_set_stop_after_current(state: State<'_, AppState>, stop: bool) -> Result<(), String> {
     state
         .player
@@ -497,8 +806,223 @@ fn emit<T: serde::Serialize + Clone>(app: &AppHandle, event: &str, payload: &T) 
 
 #[cfg(test)]
 mod tests {
-    use super::{ping_reply, ScanOutcome, ScanStatus};
+    use std::sync::mpsc;
+
+    use super::{next_playlist_id, ping_reply, AppState, ScanOutcome, ScanStatus};
+    use crate::db::Db;
+    use crate::player::Handle;
     use crate::scanner::ScanReport;
+    use crate::settings;
+
+    fn playlist(id: u32) -> settings::Playlist {
+        settings::Playlist {
+            id,
+            name: format!("Playlist {id}"),
+            tracks: Vec::new(),
+        }
+    }
+
+    /// A state with its own settings file and a player that goes nowhere.
+    fn state(dir: &std::path::Path) -> AppState {
+        let (sender, _receiver) = mpsc::channel();
+        AppState::new(
+            Db::open_in_memory().expect("db"),
+            dir.join("settings.json"),
+            Handle::new(sender),
+        )
+    }
+
+    fn library_row(id: i64, path: &str) -> crate::db::LibraryRow {
+        crate::db::LibraryRow {
+            id,
+            path: path.to_owned(),
+            genre: None,
+            artist: None,
+            album: None,
+            title: None,
+            track_number: None,
+            disc_number: None,
+            rating: None,
+            grouping: None,
+            duration_ms: 1000,
+        }
+    }
+
+    #[test]
+    fn a_playlist_keeps_its_order_and_loses_only_what_left_the_library() {
+        let rows = [
+            library_row(1, "/music/a.mp3"),
+            library_row(2, "/music/b.mp3"),
+        ];
+        let saved = vec![settings::Playlist {
+            id: 1,
+            name: "Mine".to_owned(),
+            tracks: vec![
+                "/music/b.mp3".to_owned(),
+                "/music/gone.mp3".to_owned(),
+                "/music/a.mp3".to_owned(),
+                "/music/b.mp3".to_owned(),
+            ],
+        }];
+
+        let resolved = super::resolve_playlists(saved, &rows);
+        let ids: Vec<i64> = resolved[0].tracks.iter().map(|track| track.id).collect();
+        assert_eq!(
+            ids,
+            [2, 1, 2],
+            "the order stands, a track listed twice stays twice, and the \
+             one that is gone simply drops out"
+        );
+    }
+
+    #[test]
+    fn a_playlist_name_cannot_be_empty() {
+        assert_eq!(super::check_name("  Loud  "), Ok("Loud".to_owned()));
+        assert_eq!(
+            super::check_name("   ").unwrap_err(),
+            "a playlist needs a name"
+        );
+    }
+
+    #[test]
+    fn a_change_to_a_playlist_that_is_gone_is_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state(dir.path());
+        let gone = super::create(&state, "Mine").expect("create");
+        // A second playlist that stays: without one, "the settings are
+        // unchanged" would hold however the refused calls behaved, since
+        // none of them can add a playlist.
+        let kept = super::create(&state, "Kept").expect("create");
+
+        super::delete(&state, gone).expect("delete");
+        // Everything that changes a playlist has to notice it is gone,
+        // rather than reporting a change it did not make. The message is
+        // checked too: `is_err` passes for the wrong error.
+        for (what, outcome) in [
+            ("delete", super::delete(&state, gone)),
+            ("rename", super::rename(&state, gone, "Other")),
+            ("add tracks", super::add_tracks(&state, gone, &[1])),
+        ] {
+            assert_eq!(
+                outcome.unwrap_err(),
+                "that playlist is not there any more",
+                "{what} on a playlist that is gone"
+            );
+        }
+
+        let left = state.settings().expect("load").playlists;
+        assert_eq!(left.len(), 1, "a refused change must add nothing");
+        assert_eq!(left[0].id, kept, "and must not touch the one still there");
+        assert_eq!(left[0].name, "Kept", "least of all rename it");
+        assert!(left[0].tracks.is_empty(), "nor give it tracks");
+    }
+
+    #[test]
+    fn a_playlist_is_created_renamed_and_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state(dir.path());
+
+        let first = super::create(&state, "  Loud  ").expect("create");
+        assert_eq!(
+            state.settings().expect("load").playlists[0].name,
+            "Loud",
+            "the name is stored without the spaces around it"
+        );
+        assert_eq!(
+            super::create(&state, "  ").unwrap_err(),
+            "a playlist needs a name"
+        );
+
+        let second = super::create(&state, "Quiet").expect("create");
+        assert_ne!(first, second);
+
+        super::rename(&state, first, "Louder").expect("rename");
+        let playlists = state.settings().expect("load").playlists;
+        assert_eq!(playlists[0].name, "Louder");
+        assert_eq!(playlists[1].name, "Quiet", "only the one asked for");
+
+        super::delete(&state, first).expect("delete");
+        let left = state.settings().expect("load").playlists;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, second);
+    }
+
+    #[test]
+    fn a_new_playlist_id_never_collides_with_a_live_one() {
+        assert_eq!(next_playlist_id(&[]), 1);
+        assert_eq!(next_playlist_id(&[playlist(1), playlist(2)]), 3);
+        // The highest was deleted: counting would hand out 2 again.
+        assert_eq!(next_playlist_id(&[playlist(1), playlist(7)]), 8);
+    }
+
+    #[test]
+    fn changing_one_part_of_the_settings_keeps_the_others() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state(dir.path());
+
+        state
+            .update_settings(|settings| {
+                settings.folders = vec!["/music".to_owned()];
+                settings.playlists = vec![playlist(1)];
+            })
+            .expect("write");
+
+        state
+            .update_settings(|settings| settings.playlists.push(playlist(2)))
+            .expect("write");
+        assert_eq!(
+            state.settings().expect("load").folders,
+            ["/music"],
+            "changing the playlists must not drop the folders"
+        );
+
+        state
+            .update_settings(|settings| settings.folders.push("/more".to_owned()))
+            .expect("write");
+        assert_eq!(
+            state.settings().expect("load").playlists.len(),
+            2,
+            "changing the folders must not drop the playlists"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_never_written_over() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state(dir.path());
+        state
+            .update_settings(|settings| settings.playlists.push(playlist(1)))
+            .expect("write");
+
+        // Something made the file unreadable. Writing on top of it would
+        // take the playlist with it.
+        std::fs::write(dir.path().join("settings.json"), b"{ not json").expect("write");
+        assert!(state.update_settings(|_| {}).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("settings.json")).expect("read"),
+            "{ not json",
+            "the file must be left as it is, for the user to recover"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_written_is_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state(dir.path());
+        state
+            .update_settings(|settings| settings.playlists.push(playlist(1)))
+            .expect("write");
+
+        // The settings are written by replacing a temporary file, so a
+        // directory in its place fails the write while the read still
+        // works: without that, this would fail before reaching the write.
+        std::fs::create_dir(dir.path().join("settings.json.new")).expect("mkdir");
+        assert!(
+            state.settings().is_ok(),
+            "the read must still work, or the write is never reached"
+        );
+        assert!(state.update_settings(|_| {}).is_err());
+    }
 
     #[test]
     fn the_first_caller_runs_the_scan() {

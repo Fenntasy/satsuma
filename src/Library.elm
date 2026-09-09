@@ -136,6 +136,7 @@ type Msg
     | Toggle String
     | Play (List Int) (Maybe Int)
     | Enqueue (List Int)
+    | AddToPlaylist Int (List Int)
     | SetFilter String
     | SetGrouping Grouping
 
@@ -179,6 +180,18 @@ update msg model =
 
         Enqueue ids ->
             ( model, tracksCommand "enqueue_tracks" ids )
+
+        AddToPlaylist playlistId ids ->
+            ( model
+            , Ports.send
+                (Invoke "add_to_playlist"
+                    (Encode.object
+                        [ ( "id", Encode.int playlistId )
+                        , ( "ids", Encode.list Encode.int ids )
+                        ]
+                    )
+                )
+            )
 
         SetFilter filter ->
             ( { model | filter = filter }, Cmd.none )
@@ -374,8 +387,11 @@ outcomeDecoder =
 -- VIEW
 
 
-view : Model -> Html Msg
-view model =
+{-| `activePlaylist` is the id of the open playlist, or zero when none is
+open: a plain Int so the lazy tree below can compare it.
+-}
+view : Int -> Model -> Html Msg
+view activePlaylist model =
     div [ class "library" ]
         [ h2 [] [ text "Library" ]
         , p [ class "library-stats" ] [ text (statsText model.stats) ]
@@ -408,7 +424,7 @@ view model =
                 ]
                 [ text "Rescan" ]
             ]
-        , viewTree model
+        , viewTree activePlaylist model
         ]
 
 
@@ -536,16 +552,16 @@ reportText report =
            )
 
 
-viewTree : Model -> Html Msg
-viewTree model =
+viewTree : Int -> Model -> Html Msg
+viewTree activePlaylist model =
     -- Rebuilding the tree is the expensive part of this panel, and the
     -- player reports its position several times a second: only redo it
     -- when what it is built from changed.
-    Html.Lazy.lazy4 viewTreeFor model.sortedRows model.grouping model.filter model.expanded
+    Html.Lazy.lazy5 viewTreeFor activePlaylist model.sortedRows model.grouping model.filter model.expanded
 
 
-viewTreeFor : List Tree.Row -> Grouping -> String -> Set String -> Html Msg
-viewTreeFor rows grouping filter expanded =
+viewTreeFor : Int -> List Tree.Row -> Grouping -> String -> Set String -> Html Msg
+viewTreeFor activePlaylist rows grouping filter expanded =
     let
         nodes : List Tree.Node
         nodes =
@@ -574,7 +590,7 @@ viewTreeFor rows grouping filter expanded =
             p [ class "muted" ] [ text (emptyTreeText rows) ]
 
           else
-            ul [ class "tree" ] (List.map (viewNode expanded []) nodes)
+            ul [ class "tree" ] (List.map (viewNode activePlaylist expanded []) nodes)
         ]
 
 
@@ -607,8 +623,8 @@ groupingFromLabel label =
 {-| `siblings` is what the enclosing branch holds, so choosing a track plays
 the rest of its album after it rather than that track alone.
 -}
-viewNode : Set String -> List Int -> Tree.Node -> Html Msg
-viewNode expanded siblings node =
+viewNode : Int -> Set String -> List Int -> Tree.Node -> Html Msg
+viewNode activePlaylist expanded siblings node =
     let
         isOpen : Bool
         isOpen =
@@ -681,12 +697,23 @@ viewNode expanded siblings node =
                 , title ("Add " ++ node.label ++ " to the queue")
                 , onClick (Enqueue ids)
                 ]
-                [ text "+" ]
+                [ text "⏭" ]
+            , if activePlaylist > 0 then
+                button
+                    [ type_ "button"
+                    , class "icon-button tree-add"
+                    , title ("Add " ++ node.label ++ " to the playlist")
+                    , onClick (AddToPlaylist activePlaylist ids)
+                    ]
+                    [ text "+" ]
+
+              else
+                text ""
             ]
         , case node.children of
             Branches children ->
                 if isOpen then
-                    ul [ class "tree" ] (List.map (viewNode expanded node.ids) children)
+                    ul [ class "tree" ] (List.map (viewNode activePlaylist expanded node.ids) children)
 
                 else
                     text ""

@@ -8,6 +8,7 @@ const FORWARDED_EVENTS = [
 ];
 
 const THEME_KEY = "satsuma.theme";
+const WIDTHS_KEY = "satsuma.columnWidths";
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
 function readTheme() {
@@ -23,6 +24,23 @@ function saveTheme(value) {
     localStorage.setItem(THEME_KEY, value);
   } catch {
     // Storage may be unavailable; the in-memory setting still applies.
+  }
+}
+
+function readWidths() {
+  try {
+    const stored = localStorage.getItem(WIDTHS_KEY);
+    return stored === null ? {} : JSON.parse(stored);
+  } catch {
+    return {};
+  }
+}
+
+function saveWidths(widths) {
+  try {
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify(widths));
+  } catch {
+    // Widths are a convenience; failing to keep them is not worth a fuss.
   }
 }
 
@@ -84,7 +102,11 @@ export async function start(Elm, node) {
 
   app = Elm.Main.init({
     node,
-    flags: { theme: readTheme(), systemDark: darkQuery.matches },
+    flags: {
+      theme: readTheme(),
+      systemDark: darkQuery.matches,
+      widths: readWidths(),
+    },
   });
   for (const message of buffered) {
     app.ports.fromJs.send(message);
@@ -97,6 +119,9 @@ export async function start(Elm, node) {
         break;
       case "saveTheme":
         saveTheme(message.value);
+        break;
+      case "saveWidths":
+        saveWidths(message.value);
         break;
       default:
         console.warn("[bridge] unknown outgoing tag", message.tag);

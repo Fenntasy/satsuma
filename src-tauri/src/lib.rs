@@ -19,7 +19,13 @@ use commands::AppState;
 /// database does not, which is what happens when an unusable cache was
 /// recreated: the folders are the user's choice, not derived data.
 fn restore_folders(db: &db::Db, settings_path: &std::path::Path) {
-    let remembered = settings::read(settings_path).folders;
+    let remembered = match settings::load(settings_path) {
+        Ok(settings) => settings.folders,
+        Err(err) => {
+            log::warn!("cannot restore the library folders ({err})");
+            return;
+        }
+    };
     if remembered.is_empty() {
         return;
     }
@@ -99,6 +105,12 @@ pub fn run() {
             commands::pick_folder,
             commands::start_scan,
             commands::library_rows,
+            commands::list_playlists,
+            commands::create_playlist,
+            commands::rename_playlist,
+            commands::delete_playlist,
+            commands::add_to_playlist,
+            commands::set_rating,
             commands::play_tracks,
             commands::enqueue_tracks,
             commands::play_library,

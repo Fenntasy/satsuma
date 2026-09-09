@@ -92,12 +92,17 @@ pub struct Track {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryRow {
     pub id: i64,
+    pub path: String,
     pub genre: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
     pub title: Option<String>,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
+    /// Stars from 1 to 5.
+    pub rating: Option<u8>,
+    /// The grouping tag as the file spells it.
+    pub grouping: Option<String>,
     pub duration_ms: u64,
 }
 
@@ -109,6 +114,7 @@ pub struct FileStamp {
     pub size: i64,
 }
 
+#[derive(Debug)]
 pub struct Db {
     conn: Connection,
 }
@@ -384,25 +390,42 @@ impl Db {
     /// Returns an error on query failure.
     pub fn library_rows(&self) -> Result<Vec<LibraryRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, genre, artist, album, title, track_number, disc_number,
-                    duration_ms
+            "SELECT id, path, genre, artist, album, title, track_number,
+                    disc_number, rating, grouping_raw, duration_ms
              FROM tracks",
         )?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(LibraryRow {
                     id: row.get(0)?,
-                    genre: row.get(1)?,
-                    artist: row.get(2)?,
-                    album: row.get(3)?,
-                    title: row.get(4)?,
-                    track_number: row.get(5)?,
-                    disc_number: row.get(6)?,
-                    duration_ms: row.get::<_, i64>(7)?.try_into().unwrap_or(0),
+                    path: row.get(1)?,
+                    genre: row.get(2)?,
+                    artist: row.get(3)?,
+                    album: row.get(4)?,
+                    title: row.get(5)?,
+                    track_number: row.get(6)?,
+                    disc_number: row.get(7)?,
+                    rating: row.get(8)?,
+                    grouping: row.get(9)?,
+                    duration_ms: row.get::<_, i64>(10)?.try_into().unwrap_or(0),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Records a star rating. The file itself is the source of truth; this
+    /// only keeps the cache in step.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on query failure.
+    pub fn set_rating(&self, id: i64, stars: Option<u8>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tracks SET rating = ?2 WHERE id = ?1",
+            params![id, stars],
+        )?;
+        Ok(())
     }
 
     /// The tracks with these ids, in the order they were asked for. Ids
@@ -745,6 +768,29 @@ mod tests {
     }
 
     #[test]
+    fn a_rating_is_recorded_in_the_cache() {
+        let db = Db::open_in_memory().expect("db");
+        let folder = db.add_folder("/music").expect("add");
+        db.upsert_tracks(&[TrackRecord {
+            folder_id: folder.id,
+            stamp: stamp("/music/a.mp3"),
+            tags: TrackTags {
+                title: Some("A".to_owned()),
+                duration_ms: 1000,
+                ..TrackTags::default()
+            },
+        }])
+        .expect("upsert");
+        let id = db.list_tracks(None).expect("list")[0].id;
+
+        db.set_rating(id, Some(4)).expect("rate");
+        assert_eq!(db.library_rows().expect("rows")[0].rating, Some(4));
+
+        db.set_rating(id, None).expect("unrate");
+        assert_eq!(db.library_rows().expect("rows")[0].rating, None);
+    }
+
+    #[test]
     fn library_rows_carry_what_the_tree_groups_by() {
         let db = Db::open_in_memory().expect("db");
         let folder = db.add_folder("/music").expect("add");
@@ -759,6 +805,7 @@ mod tests {
                 track_number: Some(3),
                 disc_number: Some(1),
                 year: Some(2024),
+                grouping_raw: Some("Chant / Loud / Happy".to_owned()),
                 duration_ms: 1000,
                 ..TrackTags::default()
             },
@@ -774,6 +821,7 @@ mod tests {
         assert_eq!(row.title.as_deref(), Some("A"));
         assert_eq!(row.track_number, Some(3));
         assert_eq!(row.disc_number, Some(1));
+        assert_eq!(row.grouping.as_deref(), Some("Chant / Loud / Happy"));
         assert_eq!(row.duration_ms, 1000);
     }
 
