@@ -65,7 +65,14 @@ pub fn write_rating(path: &Path, stars: Option<u8>) -> Result<(), TagError> {
     match stars.and_then(star_rating) {
         Some(rating) => {
             let popularimeter = Popularimeter::windows_media_player(rating, 0);
-            tag.insert_text(ItemKey::Popularimeter, popularimeter.to_string());
+            // The answer says whether this kind of tag can hold a rating at
+            // all; ignoring it would report success having written nothing.
+            if !tag.insert_text(ItemKey::Popularimeter, popularimeter.to_string()) {
+                return Err(TagError::Write {
+                    path: path.display().to_string(),
+                    message: format!("{tag_type:?} tags cannot hold a rating"),
+                });
+            }
         }
         None => {
             tag.remove_key(ItemKey::Popularimeter);
@@ -307,6 +314,34 @@ pub(crate) mod tests {
 
         super::write_rating(&path, Some(5)).expect("write");
         assert_eq!(read_tags(&path).expect("read").rating, Some(5));
+    }
+
+    #[test]
+    fn a_rating_round_trips_through_a_flac_too() {
+        // Every other rating test uses an MP3, so nothing would notice a
+        // format whose tags cannot hold one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("silence.flac");
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/silence.flac"),
+            &path,
+        )
+        .expect("copy");
+
+        match super::write_rating(&path, Some(3)) {
+            Ok(()) => assert_eq!(
+                read_tags(&path).expect("read").rating,
+                Some(3),
+                "a rating reported as written must be readable again"
+            ),
+            Err(err) => {
+                let message = err.to_string();
+                assert!(
+                    message.contains("cannot hold a rating"),
+                    "a format that cannot hold a rating must say so: {message}"
+                );
+            }
+        }
     }
 
     #[test]

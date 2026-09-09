@@ -700,9 +700,7 @@ test("the track that is playing stands out", async ({ page }) => {
   await expect(page.locator(".playlist-row.is-playing")).toHaveCount(1);
 });
 
-test("the library button adds to the open playlist rather than the queue", async ({
-  page,
-}) => {
+test("the library adds to the open playlist", async ({ page }) => {
   await openWithPlaylist(page);
   await clearCalls(page);
   await page.getByTitle("Add Indie to the playlist").click();
@@ -711,8 +709,19 @@ test("the library button adds to the open playlist rather than the queue", async
     .toContainEqual({ command: "add_to_playlist", args: { id: 1, ids: [1, 2] } });
 });
 
-test("with no playlist the library button still fills the queue", async ({ page }) => {
+test("the library can still queue while a playlist is open", async ({ page }) => {
+  await openWithPlaylist(page);
+  await clearCalls(page);
+  await page.getByTitle("Add Indie to the queue").click();
+  await expect
+    .poll(() => calls(page))
+    .toContainEqual({ command: "enqueue_tracks", args: { ids: [1, 2] } });
+});
+
+test("with no playlist only the queue button is offered", async ({ page }) => {
   await open(page);
+  await expect(page.getByTitle("Add Indie to the queue")).toBeVisible();
+  await expect(page.getByTitle("Add Indie to the playlist")).toHaveCount(0);
   await clearCalls(page);
   await page.getByTitle("Add Indie to the queue").click();
   await expect

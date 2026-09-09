@@ -212,11 +212,18 @@ update msg model =
         Focused ->
             ( model, Cmd.none )
 
-        SetWidth column width ->
+        SetWidth column delta ->
             let
                 widths : Dict String Int
                 widths =
-                    Dict.insert (Playlist.columnLabel column) (max 40 width) model.widths
+                    -- Resolved here rather than in the view: the browser
+                    -- sends several moves between two renders, and a width
+                    -- captured at render time would be stale for all but
+                    -- the first.
+                    Dict.insert
+                        (Playlist.columnLabel column)
+                        (max 40 (widthOf model column + delta))
+                        model.widths
             in
             ( { model | widths = widths }
             , Ports.send (SaveWidths (Dict.toList widths))
@@ -661,7 +668,7 @@ viewHeading model column =
             [ class "column-grip"
             , title "Drag to resize"
             , Attr.attribute "role" "separator"
-            , onResize column (widthOf model column)
+            , onResize column
             ]
             []
         ]
@@ -673,14 +680,14 @@ widthOf model column =
         |> Maybe.withDefault (Playlist.defaultWidth column)
 
 
-{-| Resizing follows the pointer: the grip reports where it was dropped and
-the column takes the width that leaves.
+{-| Resizing follows the pointer: the grip reports how far it moved and the
+column grows or shrinks by that much.
 -}
-onResize : Column -> Int -> Html.Attribute Msg
-onResize column current =
+onResize : Column -> Html.Attribute Msg
+onResize column =
     Html.Events.on "resized"
         (Decode.at [ "detail", "delta" ] Decode.int
-            |> Decode.map (\delta -> SetWidth column (current + delta))
+            |> Decode.map (SetWidth column)
         )
 
 

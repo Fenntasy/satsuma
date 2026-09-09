@@ -695,16 +695,21 @@ viewNode activePlaylist expanded siblings node =
             , button
                 [ type_ "button"
                 , class "icon-button tree-add"
-                , title (addLabel activePlaylist node.label)
-                , onClick
-                    (if activePlaylist > 0 then
-                        AddToPlaylist activePlaylist ids
-
-                     else
-                        Enqueue ids
-                    )
+                , title ("Add " ++ node.label ++ " to the queue")
+                , onClick (Enqueue ids)
                 ]
-                [ text "+" ]
+                [ text "⏭" ]
+            , if activePlaylist > 0 then
+                button
+                    [ type_ "button"
+                    , class "icon-button tree-add"
+                    , title ("Add " ++ node.label ++ " to the playlist")
+                    , onClick (AddToPlaylist activePlaylist ids)
+                    ]
+                    [ text "+" ]
+
+              else
+                text ""
             ]
         , case node.children of
             Branches children ->
@@ -717,18 +722,6 @@ viewNode activePlaylist expanded siblings node =
             Track ->
                 text ""
         ]
-
-
-{-| Where the button adds to: the open playlist when there is one, and the
-queue otherwise.
--}
-addLabel : Int -> String -> String
-addLabel activePlaylist label =
-    if activePlaylist > 0 then
-        "Add " ++ label ++ " to the playlist"
-
-    else
-        "Add " ++ label ++ " to the queue"
 
 
 {-| Says how to play a row, since a single click only opens a branch.
