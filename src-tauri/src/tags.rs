@@ -42,8 +42,11 @@ pub struct TrackTags {
 /// Writes a star rating into the file, so the rating lives with the music
 /// rather than only in the cache.
 ///
-/// `stars` is 1 to 5, or `None` to remove the rating. The Windows Media
-/// Player spelling is used, which is what Strawberry and most taggers read.
+/// `stars` is 1 to 5, or `None` to remove the rating. In an `ID3v2` tag it
+/// is a `POPM` frame in the Windows Media Player spelling, which is what
+/// Strawberry and most taggers read; other tag formats write it their own
+/// way. A tag that cannot hold a rating at all is refused rather than
+/// silently left unrated.
 ///
 /// # Errors
 ///
@@ -319,7 +322,7 @@ pub(crate) mod tests {
     #[test]
     fn a_rating_round_trips_through_a_flac_too() {
         // Every other rating test uses an MP3, so nothing would notice a
-        // format whose tags cannot hold one.
+        // format that stores ratings another way.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("silence.flac");
         std::fs::copy(
@@ -328,20 +331,15 @@ pub(crate) mod tests {
         )
         .expect("copy");
 
-        match super::write_rating(&path, Some(3)) {
-            Ok(()) => assert_eq!(
-                read_tags(&path).expect("read").rating,
-                Some(3),
-                "a rating reported as written must be readable again"
-            ),
-            Err(err) => {
-                let message = err.to_string();
-                assert!(
-                    message.contains("cannot hold a rating"),
-                    "a format that cannot hold a rating must say so: {message}"
-                );
-            }
-        }
+        super::write_rating(&path, Some(3)).expect("write");
+        assert_eq!(
+            read_tags(&path).expect("read").rating,
+            Some(3),
+            "the rating must survive in a format that is not ID3"
+        );
+
+        super::write_rating(&path, None).expect("write");
+        assert_eq!(read_tags(&path).expect("read").rating, None);
     }
 
     #[test]

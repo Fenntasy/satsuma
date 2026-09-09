@@ -296,6 +296,17 @@ fn scan_once(app: &AppHandle, state: &State<'_, AppState>) -> ScanOutcome {
 
 // PLAYER
 
+/// An id no playlist holds. Taken past the highest rather than from the
+/// count, so deleting one and adding another cannot collide.
+fn next_playlist_id(playlists: &[settings::Playlist]) -> u32 {
+    playlists
+        .iter()
+        .map(|playlist| playlist.id)
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
 /// A playlist as the frontend shows it: its tracks resolved against the
 /// library, so a file that left it simply disappears from the list.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -341,13 +352,7 @@ pub fn list_playlists(state: State<'_, AppState>) -> Result<Vec<PlaylistView>, S
 pub fn create_playlist(state: State<'_, AppState>, name: String) -> Result<u32, String> {
     let mut id = 0;
     state.update_settings(|settings| {
-        id = settings
-            .playlists
-            .iter()
-            .map(|playlist| playlist.id)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        id = next_playlist_id(&settings.playlists);
         settings.playlists.push(settings::Playlist {
             id,
             name: name.trim().to_owned(),
@@ -654,8 +659,79 @@ fn emit<T: serde::Serialize + Clone>(app: &AppHandle, event: &str, payload: &T) 
 
 #[cfg(test)]
 mod tests {
-    use super::{ping_reply, ScanOutcome, ScanStatus};
+    use std::sync::mpsc;
+
+    use super::{next_playlist_id, ping_reply, AppState, ScanOutcome, ScanStatus};
+    use crate::db::Db;
+    use crate::player::Handle;
     use crate::scanner::ScanReport;
+    use crate::settings;
+
+    fn playlist(id: u32) -> settings::Playlist {
+        settings::Playlist {
+            id,
+            name: format!("Playlist {id}"),
+            tracks: Vec::new(),
+        }
+    }
+
+    /// A state with its own settings file and a player that goes nowhere.
+    fn state(dir: &std::path::Path) -> AppState {
+        let (sender, _receiver) = mpsc::channel();
+        AppState::new(
+            Db::open_in_memory().expect("db"),
+            dir.join("settings.json"),
+            Handle::new(sender),
+        )
+    }
+
+    #[test]
+    fn a_new_playlist_id_never_collides_with_a_live_one() {
+        assert_eq!(next_playlist_id(&[]), 1);
+        assert_eq!(next_playlist_id(&[playlist(1), playlist(2)]), 3);
+        // The highest was deleted: counting would hand out 2 again.
+        assert_eq!(next_playlist_id(&[playlist(1), playlist(7)]), 8);
+    }
+
+    #[test]
+    fn changing_one_part_of_the_settings_keeps_the_others() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state(dir.path());
+
+        state
+            .update_settings(|settings| {
+                settings.folders = vec!["/music".to_owned()];
+                settings.playlists = vec![playlist(1)];
+            })
+            .expect("write");
+
+        state
+            .update_settings(|settings| settings.playlists.push(playlist(2)))
+            .expect("write");
+        assert_eq!(
+            state.settings().folders,
+            ["/music"],
+            "changing the playlists must not drop the folders"
+        );
+
+        state
+            .update_settings(|settings| settings.folders.push("/more".to_owned()))
+            .expect("write");
+        assert_eq!(
+            state.settings().playlists.len(),
+            2,
+            "changing the folders must not drop the playlists"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_written_is_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A directory where the file should be: writing it cannot work.
+        std::fs::create_dir(dir.path().join("settings.json")).expect("mkdir");
+        let state = state(dir.path());
+        assert!(state.update_settings(|_| {}).is_err());
+    }
 
     #[test]
     fn the_first_caller_runs_the_scan() {
