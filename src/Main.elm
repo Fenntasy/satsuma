@@ -1,8 +1,9 @@
-module Main exposing (BackendStatus, Flags, Model, Msg, Panel, main)
+module Main exposing (BackendStatus, Drag, Flags, Model, Msg, Panel, main)
 
 import Bridge exposing (Incoming(..), Outgoing(..))
 import Browser
 import Browser.Dom
+import Browser.Events
 import Dict exposing (Dict)
 import Html exposing (Html, button, div, h1, h2, input, main_, nav, p, span, text)
 import Html.Attributes as Attr exposing (attribute, class, classList, title, type_)
@@ -66,8 +67,22 @@ type alias Model =
     -- the rows.
     , sortedTracks : List ( Int, Tree.Row )
     , widths : Dict String Int
+
+    -- Set while a column grip is held. The subscriptions follow the
+    -- pointer only while it is, so nothing listens when nothing is being
+    -- dragged.
+    , dragging : Maybe Drag
     , renaming : Maybe ( Int, String )
     , playlistError : Maybe String
+    }
+
+
+{-| A resize in progress: which column, and where the pointer was when it
+was last acted on.
+-}
+type alias Drag =
+    { column : Column
+    , from : Float
     }
 
 
@@ -102,6 +117,7 @@ init flags =
       , widths =
             Decode.decodeValue (Decode.dict Decode.int) flags.widths
                 |> Result.withDefault Dict.empty
+      , dragging = Nothing
       , renaming = Nothing
       , playlistError = Nothing
       }
@@ -133,8 +149,9 @@ type Msg
     | SortBy Column
     | Rate Int (Maybe Int)
     | PlayFrom Int
-    | SetWidth Column Int
-    | SaveWidthsNow
+    | GripPressed Column Float
+    | PointerMoved Float
+    | PointerReleased
     | Focused
     | FromJs (Result Decode.Error Incoming)
 
@@ -224,23 +241,50 @@ update msg model =
         Focused ->
             ( model, Cmd.none )
 
-        SetWidth column delta ->
-            let
-                widths : Dict String Int
-                widths =
-                    -- Resolved here rather than in the view: the browser
-                    -- sends several moves between two renders, and a width
-                    -- captured at render time would be stale for all but
-                    -- the first.
-                    Dict.insert
-                        (Playlist.columnLabel column)
-                        (max 40 (widthOf model column + delta))
-                        model.widths
-            in
-            ( { model | widths = widths }, Cmd.none )
+        GripPressed column x ->
+            ( { model | dragging = Just { column = column, from = x } }, Cmd.none )
 
-        SaveWidthsNow ->
-            ( model, Ports.send (SaveWidths (Dict.toList model.widths)) )
+        PointerMoved x ->
+            case model.dragging of
+                Just drag ->
+                    let
+                        delta : Int
+                        delta =
+                            round (x - drag.from)
+                    in
+                    if delta == 0 then
+                        -- Nothing moved a whole pixel yet, so the pointer
+                        -- it was measured from stands: rounding away
+                        -- fractions of a pixel one move at a time would
+                        -- lose them all.
+                        ( model, Cmd.none )
+
+                    else
+                        ( { model
+                            | dragging = Just { drag | from = x }
+                            , widths =
+                                Dict.insert
+                                    (Playlist.columnLabel drag.column)
+                                    (max minimumWidth (widthOf model drag.column + delta))
+                                    model.widths
+                          }
+                        , Cmd.none
+                        )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        PointerReleased ->
+            case model.dragging of
+                Just _ ->
+                    -- Saved once, at the end: writing to storage on every
+                    -- move would do it at pointer rate.
+                    ( { model | dragging = Nothing }
+                    , Ports.send (SaveWidths (Dict.toList model.widths))
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
 
         FromJs (Ok (SystemTheme dark)) ->
             ( { model | systemDark = dark }, Cmd.none )
@@ -459,8 +503,28 @@ isPlaylistCommand command =
 
 
 subscriptions : Model -> Sub Msg
-subscriptions _ =
-    Ports.receive FromJs
+subscriptions model =
+    Sub.batch
+        [ Ports.receive FromJs
+
+        -- Only while a grip is held: a drag has to follow the pointer
+        -- outside the column it started in, and off the window entirely,
+        -- but nothing should listen for that the rest of the time.
+        , case model.dragging of
+            Just _ ->
+                Sub.batch
+                    [ Browser.Events.onMouseMove (Decode.map PointerMoved clientX)
+                    , Browser.Events.onMouseUp (Decode.succeed PointerReleased)
+                    ]
+
+            Nothing ->
+                Sub.none
+        ]
+
+
+clientX : Decode.Decoder Float
+clientX =
+    Decode.field "clientX" Decode.float
 
 
 
@@ -732,8 +796,7 @@ viewHeading model column =
             [ class "column-grip"
             , title "Drag to resize"
             , Attr.attribute "role" "separator"
-            , onResize column
-            , Html.Events.on "resizeend" (Decode.succeed SaveWidthsNow)
+            , onGrab column
             ]
             []
         ]
@@ -745,15 +808,25 @@ widthOf model column =
         |> Maybe.withDefault (Playlist.defaultWidth column)
 
 
-{-| Resizing follows the pointer: the grip reports how far it moved and the
-column grows or shrinks by that much.
+{-| Takes hold of a column. The pointer is followed from `subscriptions`
+until it is let go, because a drag leaves the grip almost at once.
+
+The default is prevented so that dragging selects the heading text
+instead of resizing the column.
+
 -}
-onResize : Column -> Html.Attribute Msg
-onResize column =
-    Html.Events.on "resized"
-        (Decode.at [ "detail", "delta" ] Decode.int
-            |> Decode.map (SetWidth column)
-        )
+onGrab : Column -> Html.Attribute Msg
+onGrab column =
+    Html.Events.preventDefaultOn "mousedown"
+        (Decode.map (\x -> ( GripPressed column x, True )) clientX)
+
+
+{-| The narrowest a column may be dragged: past this the heading and its
+grip are gone and there is nothing left to drag back.
+-}
+minimumWidth : Int
+minimumWidth =
+    40
 
 
 viewRow : Int -> Tree.Row -> Html Msg

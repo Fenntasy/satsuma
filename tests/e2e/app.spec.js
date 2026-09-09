@@ -845,6 +845,27 @@ test("a column is resized by dragging its grip", async ({ page }) => {
   expect(after).toBeGreaterThan(before + 30);
 });
 
+test("a resized column is still that wide after a reload", async ({ page }) => {
+  // The width goes out through `saveWidths` and comes back as a flag, and
+  // the two halves are named separately on each side of the bridge. A
+  // typo in either, or a key shape that does not match, degrades to no
+  // saved widths with no error: only a reload notices.
+  await openWithPlaylist(page);
+  const heading = () => page.locator("th").first();
+  const grip = heading().locator(".column-grip");
+  const box = await grip.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2, { steps: 6 });
+  await page.mouse.up();
+  const dragged = await heading().evaluate((element) => element.getBoundingClientRect().width);
+
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Favourites" })).toBeVisible();
+  const reloaded = await heading().evaluate((element) => element.getBoundingClientRect().width);
+  expect(Math.abs(reloaded - dragged)).toBeLessThan(2);
+});
+
 test("the panels switch", async ({ page }) => {
   await open(page);
   await page.getByRole("button", { name: "Now playing" }).click();

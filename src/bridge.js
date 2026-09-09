@@ -45,47 +45,6 @@ function saveWidths(widths) {
 }
 
 /**
- * Turns a drag of a column grip into a `resized` event carrying how far it
- * moved, which is all Elm needs to work out the new width.
- */
-function installColumnResizing(root) {
-  let dragging = null;
-
-  root.addEventListener("mousedown", (event) => {
-    const grip = event.target.closest(".column-grip");
-    if (grip === null) {
-      return;
-    }
-    dragging = { grip, from: event.clientX };
-    event.preventDefault();
-  });
-
-  window.addEventListener("mousemove", (event) => {
-    if (dragging === null) {
-      return;
-    }
-    const delta = Math.round(event.clientX - dragging.from);
-    if (delta === 0) {
-      return;
-    }
-    dragging.from = event.clientX;
-    dragging.grip.dispatchEvent(
-      new CustomEvent("resized", { detail: { delta }, bubbles: false }),
-    );
-  });
-
-  window.addEventListener("mouseup", () => {
-    if (dragging === null) {
-      return;
-    }
-    // One event at the end of the drag: saving on every move would write
-    // to storage at pointer rate.
-    dragging.grip.dispatchEvent(new CustomEvent("resizeend", { bubbles: false }));
-    dragging = null;
-  });
-}
-
-/**
  * A command rejects with whatever the backend returned, which is a string
  * today but need not be: anything else is shown as JSON rather than as
  * "[object Object]".
@@ -149,7 +108,6 @@ export async function start(Elm, node) {
       widths: readWidths(),
     },
   });
-  installColumnResizing(node);
   for (const message of buffered) {
     app.ports.fromJs.send(message);
   }
