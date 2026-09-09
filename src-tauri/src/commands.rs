@@ -1,5 +1,6 @@
 //! Tauri commands exposed to the frontend.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -95,11 +96,24 @@ impl AppState {
                 return;
             }
         };
-        let settings = settings::Settings {
-            folders: folders.into_iter().map(|folder| folder.path).collect(),
-        };
+        self.update_settings(|settings| {
+            settings.folders = folders.into_iter().map(|folder| folder.path).collect();
+        });
+    }
+
+    /// What the settings file holds today.
+    fn settings(&self) -> settings::Settings {
+        settings::read(&self.settings_path)
+    }
+
+    /// Changes the settings file, keeping everything `change` does not
+    /// touch: writing a whole `Settings` built from one part would drop the
+    /// others.
+    fn update_settings(&self, change: impl FnOnce(&mut settings::Settings)) {
+        let mut settings = self.settings();
+        change(&mut settings);
         if let Err(err) = settings::write(&self.settings_path, &settings) {
-            log::warn!("cannot save the library folders ({err})");
+            log::warn!("cannot save the settings ({err})");
         }
     }
 
@@ -272,6 +286,158 @@ fn scan_once(app: &AppHandle, state: &State<'_, AppState>) -> ScanOutcome {
 }
 
 // PLAYER
+
+/// A playlist as the frontend shows it: its tracks resolved against the
+/// library, so a file that left it simply disappears from the list.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PlaylistView {
+    pub id: u32,
+    pub name: String,
+    pub tracks: Vec<LibraryRow>,
+}
+
+/// The playlists, with their tracks looked up in the library.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn list_playlists(state: State<'_, AppState>) -> Result<Vec<PlaylistView>, String> {
+    let saved = state.settings().playlists;
+    let rows = state.with_db(Db::library_rows)?;
+    let by_path: HashMap<&str, &LibraryRow> =
+        rows.iter().map(|row| (row.path.as_str(), row)).collect();
+    Ok(saved
+        .into_iter()
+        .map(|playlist| PlaylistView {
+            id: playlist.id,
+            name: playlist.name,
+            tracks: playlist
+                .tracks
+                .iter()
+                .filter_map(|path| by_path.get(path.as_str()).map(|row| (*row).clone()))
+                .collect(),
+        })
+        .collect())
+}
+
+/// Adds a playlist and answers with its id.
+///
+/// # Errors
+///
+/// Returns a message when the settings cannot be written.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn create_playlist(state: State<'_, AppState>, name: String) -> Result<u32, String> {
+    let mut id = 0;
+    state.update_settings(|settings| {
+        id = settings
+            .playlists
+            .iter()
+            .map(|playlist| playlist.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        settings.playlists.push(settings::Playlist {
+            id,
+            name: name.trim().to_owned(),
+            tracks: Vec::new(),
+        });
+    });
+    Ok(id)
+}
+
+/// # Errors
+///
+/// Returns a message when the name is empty.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn rename_playlist(state: State<'_, AppState>, id: u32, name: String) -> Result<(), String> {
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err("a playlist needs a name".to_owned());
+    }
+    state.update_settings(|settings| {
+        if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
+            playlist.name = name;
+        }
+    });
+    Ok(())
+}
+
+/// # Errors
+///
+/// Never fails; the result keeps the shape the frontend expects.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn delete_playlist(state: State<'_, AppState>, id: u32) -> Result<(), String> {
+    state.update_settings(|settings| {
+        settings.playlists.retain(|playlist| playlist.id != id);
+    });
+    Ok(())
+}
+
+/// Adds tracks at the end of a playlist.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn add_to_playlist(state: State<'_, AppState>, id: u32, ids: Vec<i64>) -> Result<(), String> {
+    let tracks = state.with_db(|db| db.tracks_by_ids(&ids))?;
+    state.update_settings(|settings| {
+        if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
+            playlist
+                .tracks
+                .extend(tracks.iter().map(|track| track.path.clone()));
+        }
+    });
+    Ok(())
+}
+
+/// Replaces what a playlist holds, which is how a removal or a reorder is
+/// saved.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn set_playlist_tracks(
+    state: State<'_, AppState>,
+    id: u32,
+    ids: Vec<i64>,
+) -> Result<(), String> {
+    let tracks = state.with_db(|db| db.tracks_by_ids(&ids))?;
+    state.update_settings(|settings| {
+        if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
+            playlist.tracks = tracks.iter().map(|track| track.path.clone()).collect();
+        }
+    });
+    Ok(())
+}
+
+/// Rates a track, writing the stars into the file first so the music keeps
+/// the rating, then into the cache.
+///
+/// # Errors
+///
+/// Returns a message when the track is unknown or the file cannot be
+/// written.
+#[tauri::command(async)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn set_rating(state: State<'_, AppState>, id: i64, stars: Option<u8>) -> Result<(), String> {
+    let track = state
+        .with_db(|db| db.tracks_by_ids(&[id]))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "that track is not in the library any more".to_owned())?;
+    crate::tags::write_rating(std::path::Path::new(&track.path), stars)
+        .map_err(|err| err.to_string())?;
+    state.with_db(|db| db.set_rating(id, stars))
+}
 
 /// Everything the library tree groups by, for every track.
 ///

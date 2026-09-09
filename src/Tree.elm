@@ -33,6 +33,8 @@ type alias Row =
     , title : Maybe String
     , trackNumber : Maybe Int
     , discNumber : Maybe Int
+    , rating : Maybe Int
+    , grouping : Maybe String
     , durationMs : Int
     }
 
@@ -334,4 +336,14 @@ rowDecoder =
         (Decode.field "title" (Decode.nullable Decode.string))
         (Decode.field "track_number" (Decode.nullable Decode.int))
         (Decode.field "disc_number" (Decode.nullable Decode.int))
-        (Decode.field "duration_ms" Decode.int)
+        (Decode.field "rating" (Decode.nullable Decode.int))
+        |> andMap (Decode.field "grouping" (Decode.nullable Decode.string))
+        |> andMap (Decode.field "duration_ms" Decode.int)
+
+
+{-| Applies one more field to a decoder that is still a function, which is
+how a record with more than eight fields is decoded.
+-}
+andMap : Decoder a -> Decoder (a -> b) -> Decoder b
+andMap =
+    Decode.map2 (|>)

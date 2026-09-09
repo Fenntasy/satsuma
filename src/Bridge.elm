@@ -15,6 +15,7 @@ import Json.Encode as Encode
 type Outgoing
     = Invoke String Encode.Value
     | SaveTheme String
+    | SaveWidths (List ( String, Int ))
 
 
 type Incoming
@@ -37,6 +38,12 @@ encodeOutgoing outgoing =
             Encode.object
                 [ ( "tag", Encode.string "saveTheme" )
                 , ( "value", Encode.string setting )
+                ]
+
+        SaveWidths widths ->
+            Encode.object
+                [ ( "tag", Encode.string "saveWidths" )
+                , ( "value", Encode.object (List.map (Tuple.mapSecond Encode.int) widths) )
                 ]
 
 

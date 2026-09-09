@@ -8,6 +8,7 @@ const FORWARDED_EVENTS = [
 ];
 
 const THEME_KEY = "satsuma.theme";
+const WIDTHS_KEY = "satsuma.columnWidths";
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
 function readTheme() {
@@ -24,6 +25,58 @@ function saveTheme(value) {
   } catch {
     // Storage may be unavailable; the in-memory setting still applies.
   }
+}
+
+function readWidths() {
+  try {
+    const stored = localStorage.getItem(WIDTHS_KEY);
+    return stored === null ? {} : JSON.parse(stored);
+  } catch {
+    return {};
+  }
+}
+
+function saveWidths(widths) {
+  try {
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify(widths));
+  } catch {
+    // Widths are a convenience; failing to keep them is not worth a fuss.
+  }
+}
+
+/**
+ * Turns a drag of a column grip into a `resized` event carrying how far it
+ * moved, which is all Elm needs to work out the new width.
+ */
+function installColumnResizing(root) {
+  let dragging = null;
+
+  root.addEventListener("mousedown", (event) => {
+    const grip = event.target.closest(".column-grip");
+    if (grip === null) {
+      return;
+    }
+    dragging = { grip, from: event.clientX };
+    event.preventDefault();
+  });
+
+  window.addEventListener("mousemove", (event) => {
+    if (dragging === null) {
+      return;
+    }
+    const delta = Math.round(event.clientX - dragging.from);
+    if (delta === 0) {
+      return;
+    }
+    dragging.from = event.clientX;
+    dragging.grip.dispatchEvent(
+      new CustomEvent("resized", { detail: { delta }, bubbles: false }),
+    );
+  });
+
+  window.addEventListener("mouseup", () => {
+    dragging = null;
+  });
 }
 
 /**
@@ -84,8 +137,13 @@ export async function start(Elm, node) {
 
   app = Elm.Main.init({
     node,
-    flags: { theme: readTheme(), systemDark: darkQuery.matches },
+    flags: {
+      theme: readTheme(),
+      systemDark: darkQuery.matches,
+      widths: readWidths(),
+    },
   });
+  installColumnResizing(node);
   for (const message of buffered) {
     app.ports.fromJs.send(message);
   }
@@ -97,6 +155,9 @@ export async function start(Elm, node) {
         break;
       case "saveTheme":
         saveTheme(message.value);
+        break;
+      case "saveWidths":
+        saveWidths(message.value);
         break;
       default:
         console.warn("[bridge] unknown outgoing tag", message.tag);

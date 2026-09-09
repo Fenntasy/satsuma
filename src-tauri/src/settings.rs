@@ -14,6 +14,20 @@ pub struct Settings {
     /// The library folders, in the form they are stored in the database.
     #[serde(default)]
     pub folders: Vec<String>,
+    /// The playlists the user built. Kept here rather than in the library
+    /// cache because nothing can rebuild them from the music files.
+    #[serde(default)]
+    pub playlists: Vec<Playlist>,
+}
+
+/// A playlist, holding the paths of its tracks rather than their ids: an
+/// id belongs to the cache and does not survive it being rebuilt.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Playlist {
+    pub id: u32,
+    pub name: String,
+    #[serde(default)]
+    pub tracks: Vec<String>,
 }
 
 /// Reads the settings file, returning the defaults when it does not exist or
@@ -69,9 +83,24 @@ mod tests {
         let path = dir.path().join("settings.json");
         let settings = Settings {
             folders: vec!["/music".to_owned(), "/more music".to_owned()],
+            playlists: vec![super::Playlist {
+                id: 1,
+                name: "Favourites".to_owned(),
+                tracks: vec!["/music/a.mp3".to_owned()],
+            }],
         };
         write(&path, &settings).expect("write");
         assert_eq!(read(&path), settings);
+    }
+
+    #[test]
+    fn settings_written_before_playlists_existed_still_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, br#"{"folders":["/music"]}"#).expect("write");
+        let settings = read(&path);
+        assert_eq!(settings.folders, ["/music"]);
+        assert!(settings.playlists.is_empty());
     }
 
     #[test]

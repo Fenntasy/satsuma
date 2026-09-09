@@ -211,6 +211,8 @@ untagged =
     , title = Nothing
     , trackNumber = Nothing
     , discNumber = Nothing
+    , rating = Nothing
+    , grouping = Nothing
     , durationMs = 1000
     }
 
@@ -224,6 +226,8 @@ row id genre artist album title trackNumber =
     , title = Just title
     , trackNumber = trackNumber
     , discNumber = Just 1
+    , rating = Nothing
+    , grouping = Nothing
     , durationMs = 1000
     }
 
@@ -237,6 +241,8 @@ secondDisc =
     , title = Just "Deep cut"
     , trackNumber = Just 5
     , discNumber = Just 2
+    , rating = Nothing
+    , grouping = Nothing
     , durationMs = 1000
     }
 

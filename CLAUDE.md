@@ -20,9 +20,11 @@ streaming client. Roadmap and requirements: GitHub issues #1–#14 and
   `=x.y.z` for Cargo.
 - Music files are the source of truth for tags, ratings and grouping; the
   SQLite database is a rebuildable cache only. What the user chose rather
-  than what was derived (the library folders) is mirrored to
+  than what was derived (the library folders, the playlists) lives in
   `settings.json` in the app data directory, so recreating the cache never
-  loses it.
+  loses it. Playlists hold track paths, not ids: an id belongs to the cache.
+- A rating is written into the file first (POPM, the Windows Media Player
+  spelling that Strawberry reads) and only then into the cache.
 - Grouping tag format: `A / B / C` (Type / Volume / Vibe); parser and
   formatter live in `src-tauri/src/grouping.rs`. It is read from the standard
   ID3 `TIT1` frame (lofty `ItemKey::ContentGroup`).
