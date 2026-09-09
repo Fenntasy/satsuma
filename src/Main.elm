@@ -412,9 +412,10 @@ handlePlaylistResult command outcome model =
             Just reload
 
         ( "set_rating", Ok _ ) ->
-            -- The rating went into the file, so the row has to be read
-            -- again for the stars to show what was written.
-            Just ( { model | playlistError = Nothing }, Cmd.batch [ listPlaylists, Library.refresh |> Cmd.map LibraryMsg ] )
+            -- The rating went into the file, so the rows have to be read
+            -- again for the stars to show what was written. Only the
+            -- playlist shows them, so the library is left alone.
+            Just ( { model | playlistError = Nothing }, listPlaylists )
 
         ( _, Err error ) ->
             if isPlaylistCommand command then

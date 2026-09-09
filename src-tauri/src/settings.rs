@@ -30,20 +30,22 @@ pub struct Playlist {
     pub tracks: Vec<String>,
 }
 
-/// Reads the settings file, returning the defaults when it does not exist or
-/// cannot be parsed: settings are a convenience, never a reason to fail.
-#[must_use]
-pub fn read(path: &Path) -> Settings {
+/// Reads the settings file.
+///
+/// A file that is not there yet is not a problem: the defaults stand in for
+/// it. A file that exists but cannot be read or parsed is an error, because
+/// writing on top of the defaults would destroy what it holds, and nothing
+/// can rebuild the playlists.
+///
+/// # Errors
+///
+/// Returns a message when the file exists but cannot be read or parsed.
+pub fn load(path: &Path) -> Result<Settings, String> {
     match std::fs::read_to_string(path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|err| {
-            log::warn!("ignoring unreadable settings ({err})");
-            Settings::default()
-        }),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Settings::default(),
-        Err(err) => {
-            log::warn!("cannot read the settings ({err})");
-            Settings::default()
-        }
+        Ok(contents) => serde_json::from_str(&contents)
+            .map_err(|err| format!("the settings file cannot be read ({err})")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
+        Err(err) => Err(format!("the settings file cannot be read ({err})")),
     }
 }
 
@@ -69,12 +71,15 @@ fn temporary_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{read, write, Settings};
+    use super::{load, write, Settings};
 
     #[test]
     fn a_missing_file_gives_the_defaults() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(read(&dir.path().join("settings.json")), Settings::default());
+        assert_eq!(
+            load(&dir.path().join("settings.json")),
+            Ok(Settings::default())
+        );
     }
 
     #[test]
@@ -90,7 +95,7 @@ mod tests {
             }],
         };
         write(&path, &settings).expect("write");
-        assert_eq!(read(&path), settings);
+        assert_eq!(load(&path), Ok(settings));
     }
 
     #[test]
@@ -98,17 +103,19 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("settings.json");
         std::fs::write(&path, br#"{"folders":["/music"]}"#).expect("write");
-        let settings = read(&path);
+        let settings = load(&path).expect("load");
         assert_eq!(settings.folders, ["/music"]);
         assert!(settings.playlists.is_empty());
     }
 
     #[test]
-    fn a_broken_file_gives_the_defaults_instead_of_failing() {
+    fn a_broken_file_is_an_error_rather_than_the_defaults() {
+        // Answering with the defaults would let the next change write over
+        // playlists that nothing else can rebuild.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("settings.json");
         std::fs::write(&path, b"{ not json").expect("write");
-        assert_eq!(read(&path), Settings::default());
+        assert!(load(&path).is_err());
     }
 
     #[test]

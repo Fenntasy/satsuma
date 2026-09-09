@@ -109,8 +109,8 @@ impl AppState {
     }
 
     /// What the settings file holds today.
-    fn settings(&self) -> settings::Settings {
-        settings::read(&self.settings_path)
+    fn settings(&self) -> Result<settings::Settings, String> {
+        settings::load(&self.settings_path)
     }
 
     /// Changes the settings file, keeping everything `change` does not
@@ -121,7 +121,9 @@ impl AppState {
             .settings_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let mut settings = self.settings();
+        // Read first: writing on top of a file that cannot be parsed would
+        // throw away the playlists it holds.
+        let mut settings = self.settings()?;
         change(&mut settings);
         settings::write(&self.settings_path, &settings).map_err(|err| err.to_string())
     }
@@ -324,7 +326,7 @@ pub struct PlaylistView {
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn list_playlists(state: State<'_, AppState>) -> Result<Vec<PlaylistView>, String> {
-    let saved = state.settings().playlists;
+    let saved = state.settings()?.playlists;
     let rows = state.with_db(Db::library_rows)?;
     let by_path: HashMap<&str, &LibraryRow> =
         rows.iter().map(|row| (row.path.as_str(), row)).collect();
@@ -709,7 +711,7 @@ mod tests {
             .update_settings(|settings| settings.playlists.push(playlist(2)))
             .expect("write");
         assert_eq!(
-            state.settings().folders,
+            state.settings().expect("load").folders,
             ["/music"],
             "changing the playlists must not drop the folders"
         );
@@ -718,9 +720,28 @@ mod tests {
             .update_settings(|settings| settings.folders.push("/more".to_owned()))
             .expect("write");
         assert_eq!(
-            state.settings().playlists.len(),
+            state.settings().expect("load").playlists.len(),
             2,
             "changing the folders must not drop the playlists"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_never_written_over() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state(dir.path());
+        state
+            .update_settings(|settings| settings.playlists.push(playlist(1)))
+            .expect("write");
+
+        // Something made the file unreadable. Writing on top of it would
+        // take the playlist with it.
+        std::fs::write(dir.path().join("settings.json"), b"{ not json").expect("write");
+        assert!(state.update_settings(|_| {}).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("settings.json")).expect("read"),
+            "{ not json",
+            "the file must be left as it is, for the user to recover"
         );
     }
 

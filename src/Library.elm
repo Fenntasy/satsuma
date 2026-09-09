@@ -10,7 +10,6 @@ module Library exposing
     , handleEvent
     , handleInvokeResult
     , init
-    , refresh
     , reportText
     , update
     , view
