@@ -72,6 +72,10 @@ pub struct AppState {
     pub db: Mutex<Db>,
     scan: Arc<Mutex<ScanStatus>>,
     settings_path: PathBuf,
+    /// Held across reading, changing and writing the settings file: the
+    /// commands run on a thread pool and would otherwise lose each other's
+    /// changes.
+    settings_lock: Mutex<()>,
     player: Handle,
 }
 
@@ -82,6 +86,7 @@ impl AppState {
             db: Mutex::new(db),
             scan: Arc::new(Mutex::new(ScanStatus::default())),
             settings_path,
+            settings_lock: Mutex::new(()),
             player,
         }
     }
@@ -96,9 +101,11 @@ impl AppState {
                 return;
             }
         };
-        self.update_settings(|settings| {
+        if let Err(err) = self.update_settings(|settings| {
             settings.folders = folders.into_iter().map(|folder| folder.path).collect();
-        });
+        }) {
+            log::warn!("cannot save the library folders ({err})");
+        }
     }
 
     /// What the settings file holds today.
@@ -109,12 +116,14 @@ impl AppState {
     /// Changes the settings file, keeping everything `change` does not
     /// touch: writing a whole `Settings` built from one part would drop the
     /// others.
-    fn update_settings(&self, change: impl FnOnce(&mut settings::Settings)) {
+    fn update_settings(&self, change: impl FnOnce(&mut settings::Settings)) -> Result<(), String> {
+        let _guard = self
+            .settings_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut settings = self.settings();
         change(&mut settings);
-        if let Err(err) = settings::write(&self.settings_path, &settings) {
-            log::warn!("cannot save the settings ({err})");
-        }
+        settings::write(&self.settings_path, &settings).map_err(|err| err.to_string())
     }
 
     /// Runs `f` against the library cache. A poisoned lock is recovered: a
@@ -344,7 +353,7 @@ pub fn create_playlist(state: State<'_, AppState>, name: String) -> Result<u32, 
             name: name.trim().to_owned(),
             tracks: Vec::new(),
         });
-    });
+    })?;
     Ok(id)
 }
 
@@ -362,20 +371,18 @@ pub fn rename_playlist(state: State<'_, AppState>, id: u32, name: String) -> Res
         if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
             playlist.name = name;
         }
-    });
-    Ok(())
+    })
 }
 
 /// # Errors
 ///
-/// Never fails; the result keeps the shape the frontend expects.
+/// Returns a message when the settings cannot be written.
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn delete_playlist(state: State<'_, AppState>, id: u32) -> Result<(), String> {
     state.update_settings(|settings| {
         settings.playlists.retain(|playlist| playlist.id != id);
-    });
-    Ok(())
+    })
 }
 
 /// Adds tracks at the end of a playlist.
@@ -393,8 +400,7 @@ pub fn add_to_playlist(state: State<'_, AppState>, id: u32, ids: Vec<i64>) -> Re
                 .tracks
                 .extend(tracks.iter().map(|track| track.path.clone()));
         }
-    });
-    Ok(())
+    })
 }
 
 /// Replaces what a playlist holds, which is how a removal or a reorder is
@@ -415,8 +421,7 @@ pub fn set_playlist_tracks(
         if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
             playlist.tracks = tracks.iter().map(|track| track.path.clone()).collect();
         }
-    });
-    Ok(())
+    })
 }
 
 /// Rates a track, writing the stars into the file first so the music keeps

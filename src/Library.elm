@@ -388,7 +388,10 @@ outcomeDecoder =
 -- VIEW
 
 
-view : Maybe Int -> Model -> Html Msg
+{-| `activePlaylist` is the id of the open playlist, or zero when none is
+open: a plain Int so the lazy tree below can compare it.
+-}
+view : Int -> Model -> Html Msg
 view activePlaylist model =
     div [ class "library" ]
         [ h2 [] [ text "Library" ]
@@ -550,7 +553,7 @@ reportText report =
            )
 
 
-viewTree : Maybe Int -> Model -> Html Msg
+viewTree : Int -> Model -> Html Msg
 viewTree activePlaylist model =
     -- Rebuilding the tree is the expensive part of this panel, and the
     -- player reports its position several times a second: only redo it
@@ -558,7 +561,7 @@ viewTree activePlaylist model =
     Html.Lazy.lazy5 viewTreeFor activePlaylist model.sortedRows model.grouping model.filter model.expanded
 
 
-viewTreeFor : Maybe Int -> List Tree.Row -> Grouping -> String -> Set String -> Html Msg
+viewTreeFor : Int -> List Tree.Row -> Grouping -> String -> Set String -> Html Msg
 viewTreeFor activePlaylist rows grouping filter expanded =
     let
         nodes : List Tree.Node
@@ -621,7 +624,7 @@ groupingFromLabel label =
 {-| `siblings` is what the enclosing branch holds, so choosing a track plays
 the rest of its album after it rather than that track alone.
 -}
-viewNode : Maybe Int -> Set String -> List Int -> Tree.Node -> Html Msg
+viewNode : Int -> Set String -> List Int -> Tree.Node -> Html Msg
 viewNode activePlaylist expanded siblings node =
     let
         isOpen : Bool
@@ -694,12 +697,11 @@ viewNode activePlaylist expanded siblings node =
                 , class "icon-button tree-add"
                 , title (addLabel activePlaylist node.label)
                 , onClick
-                    (case activePlaylist of
-                        Just playlistId ->
-                            AddToPlaylist playlistId ids
+                    (if activePlaylist > 0 then
+                        AddToPlaylist activePlaylist ids
 
-                        Nothing ->
-                            Enqueue ids
+                     else
+                        Enqueue ids
                     )
                 ]
                 [ text "+" ]
@@ -720,14 +722,13 @@ viewNode activePlaylist expanded siblings node =
 {-| Where the button adds to: the open playlist when there is one, and the
 queue otherwise.
 -}
-addLabel : Maybe Int -> String -> String
+addLabel : Int -> String -> String
 addLabel activePlaylist label =
-    case activePlaylist of
-        Just _ ->
-            "Add " ++ label ++ " to the playlist"
+    if activePlaylist > 0 then
+        "Add " ++ label ++ " to the playlist"
 
-        Nothing ->
-            "Add " ++ label ++ " to the queue"
+    else
+        "Add " ++ label ++ " to the queue"
 
 
 {-| Says how to play a row, since a single click only opens a branch.

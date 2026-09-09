@@ -609,6 +609,8 @@ test("a tab is renamed by double-clicking it", async ({ page }) => {
   await page.getByRole("button", { name: "Favourites" }).dblclick();
   const field = page.getByLabel("Playlist name");
   await expect(field).toBeVisible();
+  // Typing must work straight away, without clicking the field first.
+  await expect(field).toBeFocused();
   await field.fill("Loud ones");
   await clearCalls(page);
   await field.press("Enter");

@@ -2,6 +2,7 @@ module Main exposing (BackendStatus, Flags, Model, Msg, Panel, main)
 
 import Bridge exposing (Incoming(..), Outgoing(..))
 import Browser
+import Browser.Dom
 import Dict exposing (Dict)
 import Html exposing (Html, button, div, h1, h2, input, main_, nav, p, span, text)
 import Html.Attributes as Attr exposing (attribute, class, classList, title, type_)
@@ -12,6 +13,7 @@ import Library
 import Player
 import Playlist exposing (Column)
 import Ports
+import Task
 import Theme exposing (Mode(..), Setting(..))
 import Tree
 
@@ -123,6 +125,7 @@ type Msg
     | Rate Int (Maybe Int)
     | PlayFrom Int
     | SetWidth Column Int
+    | Focused
     | FromJs (Result Decode.Error Incoming)
 
 
@@ -163,7 +166,10 @@ update msg model =
             )
 
         StartRenaming id name ->
-            ( { model | renaming = Just ( id, name ) }, Cmd.none )
+            -- The button it replaces is gone, so nothing would have focus.
+            ( { model | renaming = Just ( id, name ) }
+            , Browser.Dom.focus renameFieldId |> Task.attempt (always Focused)
+            )
 
         EditRename name ->
             ( { model | renaming = Maybe.map (\( id, _ ) -> ( id, name )) model.renaming }
@@ -202,6 +208,9 @@ update msg model =
                 , ( "startId", Encode.int id )
                 ]
             )
+
+        Focused ->
+            ( model, Cmd.none )
 
         SetWidth column width ->
             let
@@ -462,7 +471,13 @@ viewPanel : Model -> Html Msg
 viewPanel model =
     case model.panel of
         Library ->
-            Html.map LibraryMsg (Library.view (Maybe.map .id (activePlaylist model)) model.library)
+            -- An Int, not a Maybe: Html.Lazy compares by reference, and a
+            -- freshly built `Just` would never match.
+            Html.map LibraryMsg
+                (Library.view
+                    (activePlaylist model |> Maybe.map .id |> Maybe.withDefault 0)
+                    model.library
+                )
 
         NowPlaying ->
             placeholder "Now playing" "Cover art and lyrics for the current track."
@@ -521,6 +536,11 @@ viewPlaylistError error =
             text ""
 
 
+renameFieldId : String
+renameFieldId =
+    "playlist-rename"
+
+
 viewTab : Model -> Maybe Playlist.Playlist -> Playlist.Playlist -> Html Msg
 viewTab model open playlist =
     let
@@ -533,6 +553,7 @@ viewTab model open playlist =
             if id == playlist.id then
                 input
                     [ type_ "text"
+                    , Attr.id renameFieldId
                     , class "tab-rename"
                     , Attr.value name
                     , Attr.attribute "aria-label" "Playlist name"
