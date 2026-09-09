@@ -104,7 +104,6 @@ pub fn run() {
             commands::rename_playlist,
             commands::delete_playlist,
             commands::add_to_playlist,
-            commands::set_playlist_tracks,
             commands::set_rating,
             commands::play_tracks,
             commands::enqueue_tracks,

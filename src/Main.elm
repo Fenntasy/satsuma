@@ -7,6 +7,7 @@ import Dict exposing (Dict)
 import Html exposing (Html, button, div, h1, h2, input, main_, nav, p, span, text)
 import Html.Attributes as Attr exposing (attribute, class, classList, title, type_)
 import Html.Events exposing (onClick, onDoubleClick, onInput)
+import Html.Lazy
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Library
@@ -125,6 +126,7 @@ type Msg
     | Rate Int (Maybe Int)
     | PlayFrom Int
     | SetWidth Column Int
+    | SaveWidthsNow
     | Focused
     | FromJs (Result Decode.Error Incoming)
 
@@ -225,9 +227,10 @@ update msg model =
                         (max 40 (widthOf model column + delta))
                         model.widths
             in
-            ( { model | widths = widths }
-            , Ports.send (SaveWidths (Dict.toList widths))
-            )
+            ( { model | widths = widths }, Cmd.none )
+
+        SaveWidthsNow ->
+            ( model, Ports.send (SaveWidths (Dict.toList model.widths)) )
 
         FromJs (Ok (SystemTheme dark)) ->
             ( { model | systemDark = dark }, Cmd.none )
@@ -387,9 +390,6 @@ handlePlaylistResult command outcome model =
         ( "add_to_playlist", Ok _ ) ->
             Just reload
 
-        ( "set_playlist_tracks", Ok _ ) ->
-            Just reload
-
         ( "set_rating", Ok _ ) ->
             -- The rating went into the file, so the row has to be read
             -- again for the stars to show what was written.
@@ -414,7 +414,6 @@ isPlaylistCommand command =
         , "rename_playlist"
         , "delete_playlist"
         , "add_to_playlist"
-        , "set_playlist_tracks"
         , "set_rating"
         ]
 
@@ -626,12 +625,28 @@ viewTable model playlist tracks =
         [ Html.table [ class "playlist-table" ]
             [ Html.thead []
                 [ Html.tr [] (List.map (viewHeading model) Playlist.columns) ]
-            , Html.tbody []
-                (List.map (viewRow model) tracks)
+
+            -- The rows are the expensive part and the player reports its
+            -- position five times a second: redraw them only when the
+            -- tracks or the track being played change.
+            , Html.Lazy.lazy2 viewRows (playingId model) tracks
             ]
         , p [ class "playlist-footer" ]
             [ text (Playlist.footerText playlist.tracks) ]
         ]
+
+
+{-| The id of the track being played, or zero: a number, so the lazy node
+above can compare it.
+-}
+playingId : Model -> Int
+playingId model =
+    model.player.state.track |> Maybe.map .id |> Maybe.withDefault 0
+
+
+viewRows : Int -> List Tree.Row -> Html Msg
+viewRows playing tracks =
+    Html.tbody [] (List.map (viewRow playing) tracks)
 
 
 viewHeading : Model -> Column -> Html Msg
@@ -669,6 +684,7 @@ viewHeading model column =
             , title "Drag to resize"
             , Attr.attribute "role" "separator"
             , onResize column
+            , Html.Events.on "resizeend" (Decode.succeed SaveWidthsNow)
             ]
             []
         ]
@@ -691,15 +707,10 @@ onResize column =
         )
 
 
-viewRow : Model -> Tree.Row -> Html Msg
-viewRow model track =
-    let
-        isPlaying : Bool
-        isPlaying =
-            Maybe.map .id model.player.state.track == Just track.id
-    in
+viewRow : Int -> Tree.Row -> Html Msg
+viewRow playing track =
     Html.tr
-        [ classList [ ( "playlist-row", True ), ( "is-playing", isPlaying ) ]
+        [ classList [ ( "playlist-row", True ), ( "is-playing", playing == track.id ) ]
         , onDoubleClick (PlayFrom track.id)
         ]
         (List.map (viewCell track) Playlist.columns)

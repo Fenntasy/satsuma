@@ -403,27 +403,6 @@ pub fn add_to_playlist(state: State<'_, AppState>, id: u32, ids: Vec<i64>) -> Re
     })
 }
 
-/// Replaces what a playlist holds, which is how a removal or a reorder is
-/// saved.
-///
-/// # Errors
-///
-/// Returns a message when the library cannot be read.
-#[tauri::command(async)]
-#[allow(clippy::needless_pass_by_value)]
-pub fn set_playlist_tracks(
-    state: State<'_, AppState>,
-    id: u32,
-    ids: Vec<i64>,
-) -> Result<(), String> {
-    let tracks = state.with_db(|db| db.tracks_by_ids(&ids))?;
-    state.update_settings(|settings| {
-        if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
-            playlist.tracks = tracks.iter().map(|track| track.path.clone()).collect();
-        }
-    })
-}
-
 /// Rates a track, writing the stars into the file first so the music keeps
 /// the rating, then into the cache.
 ///
@@ -434,6 +413,13 @@ pub fn set_playlist_tracks(
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn set_rating(state: State<'_, AppState>, id: i64, stars: Option<u8>) -> Result<(), String> {
+    // Checked here rather than trusted: the file would quietly lose its
+    // rating while the cache kept the impossible number.
+    if let Some(stars) = stars {
+        if !(1..=5).contains(&stars) {
+            return Err(format!("a rating is one to five stars, not {stars}"));
+        }
+    }
     let track = state
         .with_db(|db| db.tracks_by_ids(&[id]))?
         .into_iter()

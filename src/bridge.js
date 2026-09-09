@@ -75,6 +75,12 @@ function installColumnResizing(root) {
   });
 
   window.addEventListener("mouseup", () => {
+    if (dragging === null) {
+      return;
+    }
+    // One event at the end of the drag: saving on every move would write
+    // to storage at pointer rate.
+    dragging.grip.dispatchEvent(new CustomEvent("resizeend", { bubbles: false }));
     dragging = null;
   });
 }
