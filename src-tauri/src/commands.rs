@@ -298,6 +298,30 @@ fn scan_once(app: &AppHandle, state: &State<'_, AppState>) -> ScanOutcome {
 
 // PLAYER
 
+/// Turns "nothing matched that id" into an error: a change that quietly
+/// did nothing looks exactly like one that worked.
+fn missing_unless(found: bool) -> Result<(), String> {
+    if found {
+        Ok(())
+    } else {
+        Err("that playlist is not there any more".to_owned())
+    }
+}
+
+/// A playlist name with the spaces around it removed.
+///
+/// # Errors
+///
+/// Returns a message when nothing is left of it: a tab with no label
+/// cannot be clicked, and only deleting it would get rid of it.
+fn check_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a playlist needs a name".to_owned());
+    }
+    Ok(name.to_owned())
+}
+
 /// An id no playlist holds. Taken past the highest rather than from the
 /// count, so deleting one and adding another cannot collide.
 fn next_playlist_id(playlists: &[settings::Playlist]) -> u32 {
@@ -328,9 +352,16 @@ pub struct PlaylistView {
 pub fn list_playlists(state: State<'_, AppState>) -> Result<Vec<PlaylistView>, String> {
     let saved = state.settings()?.playlists;
     let rows = state.with_db(Db::library_rows)?;
+    Ok(resolve_playlists(saved, &rows))
+}
+
+/// Looks the stored paths up in the library, keeping the order the playlist
+/// has. A path the library does not know is dropped: the file left, and the
+/// playlist is not the place to say so.
+fn resolve_playlists(saved: Vec<settings::Playlist>, rows: &[LibraryRow]) -> Vec<PlaylistView> {
     let by_path: HashMap<&str, &LibraryRow> =
         rows.iter().map(|row| (row.path.as_str(), row)).collect();
-    Ok(saved
+    saved
         .into_iter()
         .map(|playlist| PlaylistView {
             id: playlist.id,
@@ -341,7 +372,7 @@ pub fn list_playlists(state: State<'_, AppState>) -> Result<Vec<PlaylistView>, S
                 .filter_map(|path| by_path.get(path.as_str()).map(|row| (*row).clone()))
                 .collect(),
         })
-        .collect())
+        .collect()
 }
 
 /// Adds a playlist and answers with its id.
@@ -352,12 +383,13 @@ pub fn list_playlists(state: State<'_, AppState>) -> Result<Vec<PlaylistView>, S
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn create_playlist(state: State<'_, AppState>, name: String) -> Result<u32, String> {
+    let name = check_name(&name)?;
     let mut id = 0;
     state.update_settings(|settings| {
         id = next_playlist_id(&settings.playlists);
         settings.playlists.push(settings::Playlist {
             id,
-            name: name.trim().to_owned(),
+            name: name.clone(),
             tracks: Vec::new(),
         });
     })?;
@@ -370,15 +402,15 @@ pub fn create_playlist(state: State<'_, AppState>, name: String) -> Result<u32, 
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn rename_playlist(state: State<'_, AppState>, id: u32, name: String) -> Result<(), String> {
-    let name = name.trim().to_owned();
-    if name.is_empty() {
-        return Err("a playlist needs a name".to_owned());
-    }
+    let name = check_name(&name)?;
+    let mut found = false;
     state.update_settings(|settings| {
         if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
             playlist.name = name;
+            found = true;
         }
-    })
+    })?;
+    missing_unless(found)
 }
 
 /// # Errors
@@ -387,9 +419,12 @@ pub fn rename_playlist(state: State<'_, AppState>, id: u32, name: String) -> Res
 #[tauri::command(async)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn delete_playlist(state: State<'_, AppState>, id: u32) -> Result<(), String> {
+    let mut found = false;
     state.update_settings(|settings| {
+        found = settings.playlists.iter().any(|playlist| playlist.id == id);
         settings.playlists.retain(|playlist| playlist.id != id);
-    })
+    })?;
+    missing_unless(found)
 }
 
 /// Adds tracks at the end of a playlist.
@@ -401,13 +436,16 @@ pub fn delete_playlist(state: State<'_, AppState>, id: u32) -> Result<(), String
 #[allow(clippy::needless_pass_by_value)]
 pub fn add_to_playlist(state: State<'_, AppState>, id: u32, ids: Vec<i64>) -> Result<(), String> {
     let tracks = state.with_db(|db| db.tracks_by_ids(&ids))?;
+    let mut found = false;
     state.update_settings(|settings| {
         if let Some(playlist) = settings.playlists.iter_mut().find(|p| p.id == id) {
             playlist
                 .tracks
                 .extend(tracks.iter().map(|track| track.path.clone()));
+            found = true;
         }
-    })
+    })?;
+    missing_unless(found)
 }
 
 /// Rates a track, writing the stars into the file first so the music keeps
@@ -687,6 +725,61 @@ mod tests {
         )
     }
 
+    fn library_row(id: i64, path: &str) -> crate::db::LibraryRow {
+        crate::db::LibraryRow {
+            id,
+            path: path.to_owned(),
+            genre: None,
+            artist: None,
+            album: None,
+            title: None,
+            track_number: None,
+            disc_number: None,
+            rating: None,
+            grouping: None,
+            duration_ms: 1000,
+        }
+    }
+
+    #[test]
+    fn a_playlist_keeps_its_order_and_loses_only_what_left_the_library() {
+        let rows = [
+            library_row(1, "/music/a.mp3"),
+            library_row(2, "/music/b.mp3"),
+        ];
+        let saved = vec![settings::Playlist {
+            id: 1,
+            name: "Mine".to_owned(),
+            tracks: vec![
+                "/music/b.mp3".to_owned(),
+                "/music/gone.mp3".to_owned(),
+                "/music/a.mp3".to_owned(),
+                "/music/b.mp3".to_owned(),
+            ],
+        }];
+
+        let resolved = super::resolve_playlists(saved, &rows);
+        let ids: Vec<i64> = resolved[0].tracks.iter().map(|track| track.id).collect();
+        assert_eq!(
+            ids,
+            [2, 1, 2],
+            "the order stands, a track listed twice stays twice, and the \
+             one that is gone simply drops out"
+        );
+    }
+
+    #[test]
+    fn a_playlist_name_cannot_be_empty() {
+        assert_eq!(super::check_name("  Loud  "), Ok("Loud".to_owned()));
+        assert!(super::check_name("   ").is_err());
+    }
+
+    #[test]
+    fn a_change_to_a_playlist_that_is_gone_is_reported() {
+        assert!(super::missing_unless(true).is_ok());
+        assert!(super::missing_unless(false).is_err());
+    }
+
     #[test]
     fn a_new_playlist_id_never_collides_with_a_live_one() {
         assert_eq!(next_playlist_id(&[]), 1);
@@ -748,9 +841,19 @@ mod tests {
     #[test]
     fn a_settings_file_that_cannot_be_written_is_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // A directory where the file should be: writing it cannot work.
-        std::fs::create_dir(dir.path().join("settings.json")).expect("mkdir");
         let state = state(dir.path());
+        state
+            .update_settings(|settings| settings.playlists.push(playlist(1)))
+            .expect("write");
+
+        // The settings are written by replacing a temporary file, so a
+        // directory in its place fails the write while the read still
+        // works: without that, this would fail before reaching the write.
+        std::fs::create_dir(dir.path().join("settings.json.new")).expect("mkdir");
+        assert!(
+            state.settings().is_ok(),
+            "the read must still work, or the write is never reached"
+        );
         assert!(state.update_settings(|_| {}).is_err());
     }
 

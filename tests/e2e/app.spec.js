@@ -648,6 +648,23 @@ test("deleting a background tab leaves the open one alone", async ({ page }) => 
   await expect(page.locator(".playlist-row")).toHaveCount(0);
 });
 
+test("deleting the open tab does not show its tracks under another", async ({
+  page,
+}) => {
+  const two = [
+    { id: 1, name: "First", tracks: [ROWS[0]] },
+    { id: 2, name: "Second", tracks: [ROWS[0], ROWS[1]] },
+  ];
+  await openWithPlaylist(page, two);
+  await page.getByRole("button", { name: "Second" }).click();
+  await expect(page.locator(".playlist-row")).toHaveCount(2);
+
+  // The reply is held back, so this is what the user sees in between.
+  await page.evaluate(() => window.__SATSUMA_TEST__.reply("list_playlists", []));
+  await page.getByTitle("Delete Second").click();
+  await expect(page.locator(".playlist-row")).toHaveCount(1);
+});
+
 test("a playlist is deleted", async ({ page }) => {
   await openWithPlaylist(page);
   await clearCalls(page);

@@ -65,7 +65,14 @@ pub fn write_rating(path: &Path, stars: Option<u8>) -> Result<(), TagError> {
         message: "the file holds no tag that could be written".to_owned(),
     })?;
 
-    match stars.and_then(star_rating) {
+    let stars = match stars {
+        Some(stars) => Some(star_rating(stars).ok_or_else(|| TagError::Write {
+            path: path.display().to_string(),
+            message: format!("a rating is one to five stars, not {stars}"),
+        })?),
+        None => None,
+    };
+    match stars {
         Some(rating) => {
             let popularimeter = Popularimeter::windows_media_player(rating, 0);
             // The answer says whether this kind of tag can hold a rating at
@@ -371,11 +378,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_impossible_rating_is_treated_as_no_rating() {
+    fn an_impossible_rating_is_refused_rather_than_clearing_the_one_there() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = tagged_copy(dir.path(), "rated.mp3", &sample_tag());
-        super::write_rating(&path, Some(9)).expect("write");
-        assert_eq!(read_tags(&path).expect("read").rating, None);
+        super::write_rating(&path, Some(3)).expect("write");
+
+        assert!(super::write_rating(&path, Some(9)).is_err());
+        assert!(super::write_rating(&path, Some(0)).is_err());
+        assert_eq!(
+            read_tags(&path).expect("read").rating,
+            Some(3),
+            "a refused write must leave the rating alone"
+        );
     }
 
     #[test]

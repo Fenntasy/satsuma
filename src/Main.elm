@@ -172,7 +172,15 @@ update msg model =
             -- Only the open playlist being deleted changes what is shown;
             -- deleting another tab must not move the user.
             ( if Maybe.map .id (activePlaylist model) == Just id then
-                { model | activePlaylist = Nothing, sort = Nothing }
+                -- Also resorted: the rows of the playlist just deleted
+                -- would otherwise show under whichever tab takes over,
+                -- until the reload lands.
+                resort
+                    { model
+                        | activePlaylist = Nothing
+                        , sort = Nothing
+                        , playlists = List.filter (\p -> p.id /= id) model.playlists
+                    }
 
               else
                 model
