@@ -400,7 +400,15 @@ pub(crate) mod tests {
 
     #[test]
     fn writing_to_a_missing_file_is_an_error() {
-        assert!(super::write_rating(Path::new("/definitely/missing.mp3"), Some(3)).is_err());
+        // Which error, not merely that there was one: a file that is not
+        // there failed to be read, and saying it could not be written
+        // would send whoever reads the log looking at permissions.
+        let error = super::write_rating(Path::new("/definitely/missing.mp3"), Some(3))
+            .expect_err("a file that is not there cannot be rated");
+        assert!(
+            matches!(&error, TagError::Read { path, .. } if path == "/definitely/missing.mp3"),
+            "expected a read error naming the file, got {error:?}"
+        );
     }
 
     #[test]
