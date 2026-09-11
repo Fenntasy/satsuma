@@ -255,9 +255,12 @@ test("dragging the seek bar asks the backend to seek", async ({ page }) => {
 
   await page.locator("input.seek").fill("42000");
 
-  await expect.poll(() => calls(page)).toEqual([
-    { command: "player_seek", args: { positionMs: 42000 } },
-  ]);
+  // `track_details` is left out: a track starting makes the now-playing
+  // panel ask about it, which is nothing to do with seeking and can land
+  // either side of the clear above.
+  await expect
+    .poll(async () => (await calls(page)).filter((call) => call.command !== "track_details"))
+    .toEqual([{ command: "player_seek", args: { positionMs: 42000 } }]);
 });
 
 test("the seek bar shows where the user dropped it until the backend seeks", async ({
@@ -869,7 +872,128 @@ test("a resized column is still that wide after a reload", async ({ page }) => {
 test("the panels switch", async ({ page }) => {
   await open(page);
   await page.getByRole("button", { name: "Now playing" }).click();
-  await expect(page.getByRole("heading", { name: "Now playing" })).toBeVisible();
+  // The panel is no longer a placeholder with a heading; with nothing
+  // playing it says so.
+  await expect(page.getByText("Nothing is playing.")).toBeVisible();
   await page.getByRole("button", { name: "Playlists" }).click();
   await expect(page.getByRole("heading", { name: "Playlists" })).toBeVisible();
+});
+
+/** The reply `track_details` gives for the track the tests play. */
+const DETAILS = {
+  id: 7,
+  title: "Orange Sun",
+  artist: "The Satsumas",
+  album_artist: null,
+  album: "Citrus",
+  genre: "Indie",
+  year: 1998,
+  rating: 4,
+  grouping: "Chant / Loud / Happy",
+  cover_key: "411f5468652053617473756d61731f436974727573",
+};
+
+/** A player state with a track playing. */
+function playing(id = 7) {
+  return playerState({
+    status: "playing",
+    track: { id, title: "Orange Sun", artist: "The Satsumas", album: "Citrus", duration_ms: 185000 },
+    position_ms: 1000,
+    queue_length: 3,
+  });
+}
+
+test("the now-playing panel shows the cover and the tags", async ({ page }) => {
+  await page.addInitScript(installTauriStub, {
+    ping: "satsuma test",
+    list_folders: FOLDERS,
+    library_stats: STATS,
+    library_rows: ROWS,
+    track_details: DETAILS,
+  });
+  await page.goto("/");
+  await emit(page, "player://state", playing());
+  await page.getByRole("button", { name: "Now playing" }).click();
+
+  // The URL is built from the base the host gave the bridge and the key
+  // the backend issued, which is what the cover protocol will be asked
+  // for. Getting either wrong shows a blank square and no error.
+  await expect(page.locator(".cover-art")).toHaveAttribute(
+    "src",
+    `satsuma-cover://localhost/${DETAILS.cover_key}`,
+  );
+  await expect(page.getByRole("heading", { name: "Orange Sun" })).toBeVisible();
+  await expect(page.getByText("Citrus")).toBeVisible();
+  await expect(page.getByText("1998")).toBeVisible();
+  await expect(page.getByText("Chant / Loud / Happy")).toBeVisible();
+});
+
+test("the panel asks about a track once, not five times a second", async ({ page }) => {
+  await page.addInitScript(installTauriStub, {
+    ping: "satsuma test",
+    list_folders: FOLDERS,
+    library_stats: STATS,
+    library_rows: ROWS,
+    track_details: DETAILS,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Now playing" }).click();
+  await clearCalls(page);
+
+  // The player reports where it is five times a second while a track
+  // plays. Only the track changing is worth a question.
+  await emit(page, "player://state", playing());
+  await expect(page.locator(".cover-art")).toBeVisible();
+  for (const position of [1200, 1400, 1600, 1800, 2000]) {
+    await emit(page, "player://state", { ...playing(), position_ms: position });
+  }
+  await page.waitForTimeout(200);
+
+  const asked = (await calls(page)).filter((call) => call.command === "track_details");
+  expect(asked).toEqual([{ command: "track_details", args: { id: 7 } }]);
+});
+
+test("the next track is asked about", async ({ page }) => {
+  await page.addInitScript(installTauriStub, {
+    ping: "satsuma test",
+    list_folders: FOLDERS,
+    library_stats: STATS,
+    library_rows: ROWS,
+    track_details: DETAILS,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Now playing" }).click();
+  await emit(page, "player://state", playing(7));
+  await expect(page.locator(".cover-art")).toBeVisible();
+  await clearCalls(page);
+
+  await emit(page, "player://state", playing(8));
+  await expect
+    .poll(async () => (await calls(page)).filter((c) => c.command === "track_details"))
+    .toEqual([{ command: "track_details", args: { id: 8 } }]);
+});
+
+test("with nothing playing the panel says so", async ({ page }) => {
+  await open(page);
+  await page.getByRole("button", { name: "Now playing" }).click();
+  await expect(page.getByText("Nothing is playing.")).toBeVisible();
+  await expect(page.locator(".cover-art")).toHaveCount(0);
+});
+
+test("the music stopping empties the panel", async ({ page }) => {
+  await page.addInitScript(installTauriStub, {
+    ping: "satsuma test",
+    list_folders: FOLDERS,
+    library_stats: STATS,
+    library_rows: ROWS,
+    track_details: DETAILS,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Now playing" }).click();
+  await emit(page, "player://state", playing());
+  await expect(page.locator(".cover-art")).toBeVisible();
+
+  await emit(page, "player://state", playerState({ status: "stopped", track: null }));
+  await expect(page.getByText("Nothing is playing.")).toBeVisible();
+  await expect(page.locator(".cover-art")).toHaveCount(0);
 });

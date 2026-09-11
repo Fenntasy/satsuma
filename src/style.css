@@ -701,3 +701,66 @@ input[type="range"] {
 .playlist-error {
   padding: 0 10px 6px;
 }
+
+/* NOW PLAYING */
+
+.now-playing {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  min-height: 0;
+}
+
+.now-playing.is-empty {
+  color: var(--fg-muted);
+}
+
+.cover {
+  /* Square whatever the picture is, so the panel does not jump between
+     one album and the next. */
+  aspect-ratio: 1;
+  width: 100%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.cover-art {
+  width: 100%;
+  height: 100%;
+  /* The picture keeps its shape; a sleeve that is not square is letter
+     boxed rather than stretched. */
+  object-fit: contain;
+  display: block;
+}
+
+.track-info h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.track-info .by {
+  margin: 0 0 12px;
+  color: var(--fg-muted);
+}
+
+.tags {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.tags dt {
+  color: var(--fg-muted);
+}
+
+.tags dd {
+  margin: 0;
+  /* A long album or grouping wraps instead of pushing the panel wide. */
+  overflow-wrap: anywhere;
+}

@@ -13,6 +13,7 @@ import Html.Lazy
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Library
+import NowPlaying
 import Player
 import Playlist exposing (Column)
 import Ports
@@ -39,6 +40,10 @@ type alias Flags =
     { theme : Maybe String
     , systemDark : Bool
 
+    -- How a custom-protocol URL is spelled on this platform, which the
+    -- bridge works out: Windows and everywhere else disagree.
+    , coverBase : String
+
     -- A JSON object of column name to width: flags cannot carry a Dict.
     , widths : Decode.Value
     }
@@ -57,6 +62,7 @@ type alias Model =
     , backend : BackendStatus
     , library : Library.Model
     , player : Player.Model
+    , nowPlaying : NowPlaying.Model
     , playlists : List Playlist.Playlist
     , activePlaylist : Maybe Int
     , sort : Maybe Playlist.Sort
@@ -66,6 +72,7 @@ type alias Model =
     -- where a new list every render would defeat the lazy node that draws
     -- the rows.
     , sortedTracks : List ( Int, Tree.Row )
+    , coverBase : String
     , widths : Dict String Int
 
     -- Set while a column grip is held. The subscriptions follow the
@@ -110,6 +117,8 @@ init flags =
       , backend = Connecting
       , library = library
       , player = player
+      , nowPlaying = NowPlaying.init
+      , coverBase = flags.coverBase
       , playlists = []
       , activePlaylist = Nothing
       , sort = Nothing
@@ -318,14 +327,19 @@ update msg model =
                     result
 
                 Nothing ->
-                    case Library.handleInvokeResult command outcome model.library of
-                        Just result ->
-                            updateLibrary model result
+                    case NowPlaying.handleInvokeResult command outcome model.nowPlaying of
+                        Just nowPlaying ->
+                            ( { model | nowPlaying = nowPlaying }, Cmd.none )
 
                         Nothing ->
-                            Player.handleInvokeResult command outcome model.player
-                                |> Maybe.map (updatePlayer model)
-                                |> Maybe.withDefault ( model, Cmd.none )
+                            case Library.handleInvokeResult command outcome model.library of
+                                Just result ->
+                                    updateLibrary model result
+
+                                Nothing ->
+                                    Player.handleInvokeResult command outcome model.player
+                                        |> Maybe.map (updatePlayer model)
+                                        |> Maybe.withDefault ( model, Cmd.none )
 
         FromJs (Err error) ->
             ( { model | backend = Unreachable (Decode.errorToString error) }, Cmd.none )
@@ -406,7 +420,43 @@ updateLibrary model ( library, cmd ) =
 
 updatePlayer : Model -> ( Player.Model, Cmd Player.Msg ) -> ( Model, Cmd Msg )
 updatePlayer model ( player, cmd ) =
-    ( { model | player = player }, Cmd.map PlayerMsg cmd )
+    let
+        ( next, detailsCmd ) =
+            followPlayer { model | player = player }
+    in
+    ( next, Cmd.batch [ Cmd.map PlayerMsg cmd, detailsCmd ] )
+
+
+{-| Keeps the now-playing panel on the track the player is on.
+
+The player reports its state five times a second, so this asks for
+nothing unless the track itself changed, and remembers that it asked:
+otherwise every state event between the question and the answer would ask
+again.
+
+-}
+followPlayer : Model -> ( Model, Cmd Msg )
+followPlayer model =
+    let
+        playing : Maybe Int
+        playing =
+            model.player.state.track |> Maybe.map .id
+    in
+    if not (NowPlaying.trackChanged playing model.nowPlaying) then
+        ( model, Cmd.none )
+
+    else
+        case playing of
+            Just id ->
+                ( { model | nowPlaying = NowPlaying.loading id }
+                , invoke "track_details" [ ( "id", Encode.int id ) ]
+                )
+
+            Nothing ->
+                -- Nothing is playing, so there is nothing to ask about:
+                -- the panel empties rather than keeping the last record
+                -- on screen for ever.
+                ( { model | nowPlaying = NowPlaying.init }, Cmd.none )
 
 
 {-| Handles the replies of the playlist commands. Returns `Nothing` when
@@ -590,7 +640,7 @@ viewPanel model =
                 )
 
         NowPlaying ->
-            placeholder "Now playing" "Cover art and lyrics for the current track."
+            NowPlaying.view model.coverBase model.nowPlaying
 
         Playlists ->
             placeholder "Playlists" "Smart and regular playlists."
