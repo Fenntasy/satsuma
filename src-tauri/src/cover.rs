@@ -21,8 +21,11 @@ use crate::db::{Db, Result as DbResult};
 /// disagree about whether `Cover.jpg` and `cover.jpg` are the same file.
 const COVER_NAMES: &[&str] = &["cover", "folder", "front", "album", "albumart"];
 
-/// The extensions those files may carry.
-const COVER_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
+/// The extensions those files may carry, in the order they win when one
+/// folder holds the same name twice. `cover.png` beats `cover.jpg`:
+/// nothing in the file system decides which of the two is served, so this
+/// has to, or the answer changes with the platform and the listing order.
+const COVER_EXTENSIONS: &[&str] = &["png", "webp", "jpg", "jpeg"];
 
 /// Separates the parts inside a key before they are hex encoded. A unit
 /// separator cannot appear in a tag or a path, so decoding cannot be
@@ -139,14 +142,24 @@ const UNKNOWN_MEDIA_TYPE: &str = "application/octet-stream";
 /// that is not a key we issued, and any album with no cover, is a 404: the
 /// `img` falls back to whatever the panel put behind it, which is the same
 /// outcome and needs no special case in Elm.
+///
+/// `look_up` is given the key and answers which files might hold the
+/// cover. It is separate so that the caller can hold the library lock for
+/// that and let go of it before the files are read: opening a music file
+/// or an image on a network share is slow, and the library is what every
+/// other command and the scanner are waiting on.
 #[must_use]
-pub fn respond(db: &Db, path: &str) -> Response<Vec<u8>> {
-    let found = Key::decode(path.trim_start_matches('/')).and_then(|key| {
-        resolve(db, &key)
-            .inspect_err(|err| log::warn!("cannot look up a cover: {err}"))
-            .ok()
-            .flatten()
-    });
+pub fn respond(
+    path: &str,
+    look_up: impl FnOnce(&Key) -> DbResult<Candidates>,
+) -> Response<Vec<u8>> {
+    let found = Key::decode(path.trim_start_matches('/'))
+        .and_then(|key| {
+            look_up(&key)
+                .inspect_err(|err| log::warn!("cannot look up a cover: {err}"))
+                .ok()
+        })
+        .and_then(|candidates| read_cover(&candidates));
     let Some(cover) = found else {
         let mut response = Response::new(Vec::new());
         *response.status_mut() = StatusCode::NOT_FOUND;
@@ -199,24 +212,58 @@ fn media_type(mime: &str) -> &str {
 /// opened or holds no picture is not an error: it is one source coming up
 /// empty, and the next one is tried.
 pub fn resolve(db: &Db, key: &Key) -> DbResult<Option<Cover>> {
-    let (embedded, beside) = match key {
+    Ok(read_cover(&candidates(db, key)?))
+}
+
+/// The files a cover might be in. Both `None` means the album has nothing
+/// to look in, which is one of the ways a cover is simply not there.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Candidates {
+    /// A file the library says holds a picture.
+    pub with_picture: Option<String>,
+    /// A file to look beside, for an image in the album's folder.
+    pub beside: Option<String>,
+}
+
+/// Asks the library which files are worth opening for this cover.
+///
+/// This is the only part that needs the library, and it is a pair of
+/// indexed lookups; the reading of the files it names is not, and is
+/// deliberately left to [`read_cover`].
+///
+/// # Errors
+///
+/// Returns an error when the library cannot be read.
+pub fn candidates(db: &Db, key: &Key) -> DbResult<Candidates> {
+    match key {
         // The library already knows which files hold a picture, so the
         // one to open is found rather than guessed at.
-        Key::Album { artist, album } => (
-            db.album_track_with_cover(artist, album)?,
-            db.album_track(artist, album)?,
-        ),
-        Key::Track { path } => (Some(path.clone()), Some(path.clone())),
-    };
-    if let Some(found) = embedded
+        Key::Album { artist, album } => Ok(Candidates {
+            with_picture: db.album_track_with_cover(artist, album)?,
+            beside: db.album_track(artist, album)?,
+        }),
+        Key::Track { path } => Ok(Candidates {
+            with_picture: Some(path.clone()),
+            beside: Some(path.clone()),
+        }),
+    }
+}
+
+/// Opens the files and answers with the first cover found, or `None` when
+/// neither holds one. Touches no database, so the caller may have let the
+/// library lock go before calling it.
+#[must_use]
+pub fn read_cover(candidates: &Candidates) -> Option<Cover> {
+    candidates
+        .with_picture
         .as_deref()
         .and_then(|path| embedded_cover(Path::new(path)))
-    {
-        return Ok(Some(found));
-    }
-    Ok(beside
-        .as_deref()
-        .and_then(|path| beside_the_music(Path::new(path))))
+        .or_else(|| {
+            candidates
+                .beside
+                .as_deref()
+                .and_then(|path| beside_the_music(Path::new(path)))
+        })
 }
 
 /// The picture inside a file, if it holds one.
@@ -250,7 +297,7 @@ fn beside_the_music(track: &Path) -> Option<Cover> {
 /// asking the file system about every name and extension in turn: that is
 /// twenty questions per album on a network share.
 fn cover_file(folder: &Path) -> Option<PathBuf> {
-    let mut best: Option<(usize, PathBuf)> = None;
+    let mut best: Option<((usize, usize), PathBuf)> = None;
     for entry in std::fs::read_dir(folder).ok()?.flatten() {
         let path = entry.path();
         let Some(stem) = path.file_stem().and_then(|it| it.to_str()) else {
@@ -259,13 +306,21 @@ fn cover_file(folder: &Path) -> Option<PathBuf> {
         let Some(extension) = path.extension().and_then(|it| it.to_str()) else {
             continue;
         };
-        if !COVER_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()) {
-            continue;
-        }
-        let stem = stem.to_ascii_lowercase();
-        let Some(rank) = COVER_NAMES.iter().position(|name| *name == stem) else {
+        let lower_extension = extension.to_ascii_lowercase();
+        let Some(by_extension) = COVER_EXTENSIONS
+            .iter()
+            .position(|known| *known == lower_extension)
+        else {
             continue;
         };
+        let stem = stem.to_ascii_lowercase();
+        let Some(by_name) = COVER_NAMES.iter().position(|name| *name == stem) else {
+            continue;
+        };
+        // The name first, then the extension. Ranking both means a folder
+        // holding `cover.png` and `cover.jpg` always serves the same one,
+        // rather than whichever the file system happened to list first.
+        let rank = (by_name, by_extension);
         if best.as_ref().is_none_or(|(found, _)| rank < *found) {
             best = Some((rank, path));
         }
@@ -622,7 +677,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn one_name_in_two_formats_always_serves_the_same_one() {
+        // Nothing in the file system decides this: `read_dir` answers in
+        // whatever order the platform likes, and it is not the order the
+        // files were made in. Without a rule the served cover changes
+        // between machines, and can change between folders on one.
+        for order in [["cover.png", "cover.jpg"], ["cover.jpg", "cover.png"]] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let db = library(dir.path());
+            add(
+                &db,
+                &track_without_picture(dir.path(), "1.mp3"),
+                "Citrus",
+                false,
+            );
+            for name in order {
+                let bytes = if name.ends_with("png") { PNG } else { b"jpeg" };
+                std::fs::write(dir.path().join(name), bytes).expect("write");
+            }
+
+            let cover = resolve(&db, &citrus()).expect("resolve").expect("a cover");
+            assert_eq!(
+                cover.bytes, PNG,
+                "png wins over jpg, whichever was written first ({order:?})"
+            );
+            assert_eq!(cover.mime, "image/png");
+        }
+    }
+
     // SERVING
+
+    /// Answers a request the way the protocol handler does, with the
+    /// library consulted only for the lookup.
+    fn serve(db: &Db, path: &str) -> tauri::http::Response<Vec<u8>> {
+        super::respond(path, |key| super::candidates(db, key))
+    }
 
     #[test]
     fn a_cover_is_served_with_what_it_is_and_how_long_it_keeps() {
@@ -635,7 +725,7 @@ mod tests {
             true,
         );
 
-        let response = super::respond(&db, &format!("/{}", citrus().encode()));
+        let response = serve(&db, &format!("/{}", citrus().encode()));
         assert_eq!(response.status(), 200);
         assert_eq!(response.headers()["content-type"], "image/png");
         assert!(
@@ -659,7 +749,7 @@ mod tests {
             false,
         );
 
-        let response = super::respond(&db, &format!("/{}", citrus().encode()));
+        let response = serve(&db, &format!("/{}", citrus().encode()));
         assert_eq!(response.status(), 404);
         assert!(response.body().is_empty());
     }
@@ -679,7 +769,7 @@ mod tests {
         // by hand rather than issued, which must still work, and rubbish,
         // which must not reach the library at all.
         for path in ["/", "/zz", "/not hex", "/414243"] {
-            let response = super::respond(&db, path);
+            let response = serve(&db, path);
             assert_eq!(response.status(), 404, "{path}");
         }
     }

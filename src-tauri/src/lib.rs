@@ -98,7 +98,13 @@ pub fn run() {
             // which is not something to do while the window waits.
             std::thread::spawn(move || {
                 let state = app.state::<AppState>();
-                responder.respond(state.with_library(|db| cover::respond(db, &path)));
+                // The library is locked only to work out which files to
+                // open. Reading them is done after the lock is let go, so
+                // a cover on a slow disk cannot stall every other command
+                // and the scanner with it.
+                responder.respond(cover::respond(&path, |key| {
+                    state.with_library(|db| cover::candidates(db, key))
+                }));
             });
         })
         .setup(|app| {

@@ -103,11 +103,21 @@ suite =
                 \_ ->
                     NowPlaying.handleInvokeResult "list_playlists" (Ok Encode.null) NowPlaying.init
                         |> Expect.equal Nothing
-            , test "a track that has left the library empties the panel" <|
+            , test "a track that has left the library is not asked about again" <|
+                \_ ->
+                    -- Asserted against the id the player keeps reporting,
+                    -- not against Nothing: the player holds its own queue
+                    -- and goes on naming a track whose row a scan removed,
+                    -- and `trackChanged Nothing` would hold however this
+                    -- behaved.
+                    NowPlaying.handleInvokeResult "track_details" (Ok Encode.null) (NowPlaying.loading 1)
+                        |> Maybe.map (NowPlaying.trackChanged (Just 1))
+                        |> Expect.equal (Just False)
+            , test "but the track after it is" <|
                 \_ ->
                     NowPlaying.handleInvokeResult "track_details" (Ok Encode.null) (NowPlaying.loading 1)
-                        |> Maybe.map (NowPlaying.trackChanged Nothing)
-                        |> Expect.equal (Just False)
+                        |> Maybe.map (NowPlaying.trackChanged (Just 2))
+                        |> Expect.equal (Just True)
             , test "a refused command keeps which track it was about" <|
                 \_ ->
                     NowPlaying.handleInvokeResult "track_details"

@@ -51,6 +51,7 @@ type Model
     = Empty
     | Loading Int
     | Showing Details
+    | Gone Int
     | Failed Int String
 
 
@@ -133,7 +134,15 @@ handleInvokeResult command outcome model =
                             Showing details
 
                         Ok Nothing ->
-                            Empty
+                            -- The track kept, not forgotten: the player
+                            -- holds its own queue and goes on reporting a
+                            -- track whose file was deleted and whose row
+                            -- the next scan removed. Forgetting it here
+                            -- made every state event ask again, five
+                            -- times a second, for as long as it played.
+                            current model
+                                |> Maybe.map Gone
+                                |> Maybe.withDefault Empty
 
                         Err error ->
                             -- Said rather than swallowed: a field renamed
@@ -173,6 +182,9 @@ current model =
         Showing details ->
             Just details.id
 
+        Gone id ->
+            Just id
+
         Failed id _ ->
             Just id
 
@@ -198,6 +210,10 @@ view coverBase model =
 
         Loading _ ->
             div [ class "now-playing is-empty" ] []
+
+        Gone _ ->
+            div [ class "now-playing is-empty" ]
+                [ p [] [ text "This track is no longer in the library." ] ]
 
         Failed _ error ->
             div [ class "now-playing is-empty" ]

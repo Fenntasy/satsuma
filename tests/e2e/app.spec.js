@@ -997,3 +997,31 @@ test("the music stopping empties the panel", async ({ page }) => {
   await expect(page.getByText("Nothing is playing.")).toBeVisible();
   await expect(page.locator(".cover-art")).toHaveCount(0);
 });
+
+test("a track that has left the library is asked about once, not for ever", async ({
+  page,
+}) => {
+  // The player holds its own queue, so it goes on reporting a track whose
+  // file was deleted and whose row the next scan removed. The backend
+  // answers nothing at all for it; forgetting which track that was made
+  // every state event ask again, five times a second, for as long as it
+  // played.
+  await page.addInitScript(installTauriStub, {
+    ping: "satsuma test",
+    list_folders: FOLDERS,
+    library_stats: STATS,
+    library_rows: ROWS,
+    track_details: null,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Now playing" }).click();
+  await clearCalls(page);
+
+  for (const position of [1000, 1200, 1400, 1600, 1800, 2000]) {
+    await emit(page, "player://state", { ...playing(), position_ms: position });
+  }
+  await expect(page.getByText("This track is no longer in the library.")).toBeVisible();
+
+  const asked = (await calls(page)).filter((call) => call.command === "track_details");
+  expect(asked).toEqual([{ command: "track_details", args: { id: 7 } }]);
+});
