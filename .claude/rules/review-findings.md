@@ -20,6 +20,20 @@ was broken and how the test complained.
 This covers a test that is missing and a test whose assertion is too weak to
 fail. It stops where production code starts.
 
+### The finding is a security one
+
+Say so. A finding that widens what an attacker can reach is not an
+ordinary code change, and burying it in a list of tidying is how it gets
+waved through.
+
+Name what it lets someone do and what has to be true first, then offer
+**more than one way to close it, each with what it costs** — a narrower
+check, a different design, removing the feature — and let the user pick.
+One recommended fix presented alone is a decision taken on their behalf.
+Severity is part of the report, not a reason to skip the choice: say
+plainly how hard it is to reach, so a low risk is not dressed up as an
+emergency or a high one as a detail.
+
 ### A fix would change code
 
 Never write it first. Explain what was found with a code example — the lines
