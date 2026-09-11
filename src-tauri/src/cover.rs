@@ -387,7 +387,7 @@ mod tests {
     use lofty::tag::{Tag, TagType};
 
     use super::{resolve, Key};
-    use crate::db::{Db, FileStamp, TrackRecord};
+    use crate::db::{Db, DbError, FileStamp, TrackRecord};
     use crate::tags::TrackTags;
 
     /// A one-pixel PNG, so a test can tell one picture from another by its
@@ -784,6 +784,31 @@ mod tests {
             let response = serve(&db, path);
             assert_eq!(response.status(), 404, "{path}");
         }
+    }
+
+    #[test]
+    fn a_library_that_cannot_be_read_serves_nothing() {
+        // The file genuinely holds a picture, and the request genuinely
+        // names it, so the only thing standing between the two is the
+        // failed lookup. Asserting the 404 alone would pass just as well
+        // if the error were swallowed and the file served anyway.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = library(dir.path());
+        let track = track_with_picture(dir.path(), "1.mp3");
+        add(&db, &track, "Citrus", true);
+        let key = Key::Track {
+            path: track.display().to_string(),
+        };
+        let path = format!("/{}", key.encode());
+        assert_eq!(
+            serve(&db, &path).status(),
+            200,
+            "the file must be one that would otherwise be served"
+        );
+
+        let response = super::respond(&path, |_| Err(DbError::SchemaTooNew(99)));
+        assert_eq!(response.status(), 404);
+        assert!(response.body().is_empty());
     }
 
     #[test]
