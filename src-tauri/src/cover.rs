@@ -309,9 +309,23 @@ fn beside_the_music(track: &Path) -> Option<Cover> {
 /// asking the file system about every name and extension in turn: that is
 /// twenty questions per album on a network share.
 fn cover_file(folder: &Path) -> Option<PathBuf> {
+    best_cover(
+        std::fs::read_dir(folder)
+            .ok()?
+            .flatten()
+            .map(|it| it.path()),
+    )
+}
+
+/// Picks the cover out of a listing.
+///
+/// Separate from reading the folder so that the choice can be handed the
+/// order rather than told it: `read_dir` answers in whatever order the
+/// platform likes, which is not the order the files were written, so a
+/// test that writes two files cannot decide which one arrives first.
+fn best_cover(listing: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
     let mut best: Option<((usize, usize), PathBuf)> = None;
-    for entry in std::fs::read_dir(folder).ok()?.flatten() {
-        let path = entry.path();
+    for path in listing {
         let Some(stem) = path.file_stem().and_then(|it| it.to_str()) else {
             continue;
         };
@@ -379,7 +393,7 @@ fn from_hex(text: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use lofty::config::WriteOptions;
     use lofty::picture::{MimeType, Picture, PictureType};
@@ -690,31 +704,33 @@ mod tests {
     }
 
     #[test]
-    fn one_name_in_two_formats_always_serves_the_same_one() {
-        // Nothing in the file system decides this: `read_dir` answers in
-        // whatever order the platform likes, and it is not the order the
-        // files were made in. Without a rule the served cover changes
-        // between machines, and can change between folders on one.
-        for order in [["cover.png", "cover.jpg"], ["cover.jpg", "cover.png"]] {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let db = library(dir.path());
-            add(
-                &db,
-                &track_without_picture(dir.path(), "1.mp3"),
-                "Citrus",
-                false,
-            );
-            for name in order {
-                let bytes = if name.ends_with("png") { PNG } else { b"jpeg" };
-                std::fs::write(dir.path().join(name), bytes).expect("write");
-            }
-
-            let cover = resolve(&db, &citrus()).expect("resolve").expect("a cover");
+    fn one_name_in_two_formats_does_not_depend_on_the_listing_order() {
+        // Handed the listing rather than reading one. Writing the two
+        // files in both orders proves nothing: this file system lists
+        // entries by a hash of the name, so both orders read back
+        // identically and only one of the two cases is ever tested.
+        let png = PathBuf::from("/music/citrus/cover.png");
+        let jpg = PathBuf::from("/music/citrus/cover.jpg");
+        for listing in [[png.clone(), jpg.clone()], [jpg.clone(), png.clone()]] {
             assert_eq!(
-                cover.bytes, PNG,
-                "png wins over jpg, whichever was written first ({order:?})"
+                super::best_cover(listing.clone().into_iter()),
+                Some(png.clone()),
+                "png wins whichever way round the listing arrives ({listing:?})"
             );
-            assert_eq!(cover.mime, "image/png");
+        }
+    }
+
+    #[test]
+    fn the_name_decides_before_the_format_does() {
+        // Otherwise `folder.png` would beat `cover.jpg`, and the order the
+        // names are listed in would stop meaning anything.
+        let cover = PathBuf::from("/music/citrus/cover.jpg");
+        let folder = PathBuf::from("/music/citrus/folder.png");
+        for listing in [
+            [cover.clone(), folder.clone()],
+            [folder.clone(), cover.clone()],
+        ] {
+            assert_eq!(super::best_cover(listing.into_iter()), Some(cover.clone()));
         }
     }
 

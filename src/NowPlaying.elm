@@ -106,8 +106,11 @@ andMap =
 {-| Handles the reply to `track_details`. `Nothing` when the command
 belongs to another panel.
 
-A track that has left the library answers with nothing at all, which is
-the same as nothing playing: there is no record to show.
+A track that has left the library answers with nothing at all. Which
+track that was is kept even so, because the player goes on naming it and
+every state event would otherwise ask about it again; the panel says the
+track is no longer in the library rather than claiming nothing is
+playing.
 
 -}
 handleInvokeResult : String -> Result String Decode.Value -> Model -> Maybe Model
