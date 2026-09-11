@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::db::{Db, Folder, LibraryRow, LibraryStats};
+use crate::cover;
+use crate::db::{Db, Folder, LibraryRow, LibraryStats, TrackDetails};
 use crate::player::{self, Handle};
 use crate::queue::Repeat;
 use crate::scanner::{self, ScanProgress, ScanReport};
@@ -538,6 +539,49 @@ pub fn set_rating(state: State<'_, AppState>, id: i64, stars: Option<u8>) -> Res
     state.with_db(|db| db.set_rating(id, stars))
 }
 
+/// A track as the now-playing panel shows it: its tags, and the key its
+/// cover is served under.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct NowPlaying {
+    #[serde(flatten)]
+    pub track: TrackDetails,
+    /// What to ask the cover protocol for. Worked out here rather than in
+    /// the frontend, which would have to know how an album becomes a key
+    /// and get the same answer.
+    pub cover_key: String,
+}
+
+/// Everything the panel shows about the track with this id.
+///
+/// Answers `None` rather than an error for a track that has left the
+/// library: the panel is showing what is playing, and a file that was
+/// deleted mid-play is not a failure to report.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
+pub fn track_details(state: State<'_, AppState>, id: i64) -> Result<Option<NowPlaying>, String> {
+    Ok(state.with_db(|db| db.track_details(id))?.map(now_playing))
+}
+
+fn now_playing(track: TrackDetails) -> NowPlaying {
+    let key = cover::Key::of(
+        track.album_artist.as_deref(),
+        track.artist.as_deref(),
+        track.album.as_deref(),
+        &track.path,
+    );
+    NowPlaying {
+        cover_key: key.encode(),
+        track,
+    }
+}
+
 /// Everything the library tree groups by, for every track.
 ///
 /// # Errors
@@ -816,10 +860,11 @@ mod tests {
     use std::sync::mpsc;
 
     use super::{next_playlist_id, ping_reply, AppState, ScanOutcome, ScanStatus};
-    use crate::db::Db;
+    use crate::db::{Db, FileStamp, TrackDetails, TrackRecord};
     use crate::player::Handle;
     use crate::scanner::ScanReport;
     use crate::settings;
+    use crate::tags::TrackTags;
 
     fn playlist(id: u32) -> settings::Playlist {
         settings::Playlist {
@@ -1086,5 +1131,153 @@ mod tests {
         .expect("serialize");
         assert_eq!(failed["status"], "failed");
         assert_eq!(failed["message"], "boom");
+    }
+
+    #[test]
+    fn the_panel_is_told_everything_it_shows() {
+        let db = Db::open_in_memory().expect("db");
+        let folder = db.add_folder("/music").expect("folder");
+        db.upsert_tracks(&[TrackRecord {
+            folder_id: folder.id,
+            stamp: FileStamp {
+                path: "/music/1.mp3".to_owned(),
+                mtime: 1,
+                size: 2,
+            },
+            tags: TrackTags {
+                title: Some("Orange Sun".to_owned()),
+                artist: Some("The Satsumas".to_owned()),
+                album_artist: Some("Various".to_owned()),
+                album: Some("Citrus".to_owned()),
+                genre: Some("Indie".to_owned()),
+                year: Some(1998),
+                track_number: Some(3),
+                disc_number: Some(1),
+                rating: Some(4),
+                grouping_raw: Some("Chant / Loud / Happy".to_owned()),
+                duration_ms: 185_000,
+                ..TrackTags::default()
+            },
+        }])
+        .expect("upsert");
+        let id = db.library_rows().expect("rows")[0].id;
+
+        let details = db.track_details(id).expect("query").expect("a track");
+        // The year and the album artist are the reason this is not a
+        // library row: nothing else asks for them.
+        assert_eq!(details.year, Some(1998));
+        assert_eq!(details.album_artist.as_deref(), Some("Various"));
+        assert_eq!(details.title.as_deref(), Some("Orange Sun"));
+        assert_eq!(details.artist.as_deref(), Some("The Satsumas"));
+        assert_eq!(details.album.as_deref(), Some("Citrus"));
+        assert_eq!(details.genre.as_deref(), Some("Indie"));
+        assert_eq!(details.track_number, Some(3));
+        assert_eq!(details.disc_number, Some(1));
+        assert_eq!(details.rating, Some(4));
+        assert_eq!(details.grouping.as_deref(), Some("Chant / Loud / Happy"));
+        assert_eq!(details.duration_ms, 185_000);
+    }
+
+    #[test]
+    fn a_track_that_has_left_the_library_is_nothing_rather_than_an_error() {
+        let db = Db::open_in_memory().expect("db");
+        assert_eq!(db.track_details(404).expect("query"), None);
+    }
+
+    #[test]
+    fn the_cover_key_names_the_album_the_track_belongs_to() {
+        let details = |album_artist: Option<&str>, artist, album, path: &str| {
+            super::now_playing(TrackDetails {
+                id: 1,
+                path: path.to_owned(),
+                title: None,
+                artist: Option::<&str>::map(artist, str::to_owned),
+                album_artist: album_artist.map(str::to_owned),
+                album: Option::<&str>::map(album, str::to_owned),
+                genre: None,
+                year: None,
+                track_number: None,
+                disc_number: None,
+                rating: None,
+                grouping: None,
+                duration_ms: 0,
+            })
+        };
+
+        let first = details(None, Some("Alpha"), Some("Citrus"), "/music/1.mp3");
+        let second = details(None, Some("Alpha"), Some("Citrus"), "/music/2.mp3");
+        assert_eq!(
+            first.cover_key, second.cover_key,
+            "two tracks of one record must ask for the same cover"
+        );
+
+        let elsewhere = details(None, Some("Alpha"), Some("Lemon"), "/music/3.mp3");
+        assert_ne!(
+            first.cover_key, elsewhere.cover_key,
+            "another record is another cover"
+        );
+
+        // The key is what the protocol will be asked for, so it has to
+        // read back as the album it stands for.
+        assert_eq!(
+            crate::cover::Key::decode(&first.cover_key),
+            Some(crate::cover::Key::Album {
+                artist: "Alpha".to_owned(),
+                album: "Citrus".to_owned()
+            })
+        );
+
+        // A record whose tracks name different performers is held together
+        // by its album artist, which is why that is preferred.
+        let one = details(
+            Some("Various"),
+            Some("Beta"),
+            Some("Citrus"),
+            "/music/4.mp3",
+        );
+        let other = details(
+            Some("Various"),
+            Some("Delta"),
+            Some("Citrus"),
+            "/music/5.mp3",
+        );
+        assert_eq!(one.cover_key, other.cover_key);
+        assert_ne!(
+            first.cover_key, one.cover_key,
+            "Alpha's Citrus and Various' Citrus are two records that share a name"
+        );
+    }
+
+    #[test]
+    fn a_record_tagged_inconsistently_is_two_records() {
+        // Worth knowing rather than discovering: a record where some
+        // tracks carry an album artist and others do not is two covers,
+        // because each track is keyed on what it actually says. The tree
+        // groups the same way, by the tags a track carries and nothing
+        // else, so the fix for both is to fix the tags.
+        let track = |album_artist: Option<&str>| {
+            super::now_playing(TrackDetails {
+                id: 1,
+                path: "/music/1.mp3".to_owned(),
+                title: None,
+                artist: Some("Alpha".to_owned()),
+                album_artist: album_artist.map(str::to_owned),
+                album: Some("Citrus".to_owned()),
+                genre: None,
+                year: None,
+                track_number: None,
+                disc_number: None,
+                rating: None,
+                grouping: None,
+                duration_ms: 0,
+            })
+            .cover_key
+        };
+        assert_ne!(track(None), track(Some("The Satsumas")));
+        assert_eq!(
+            track(None),
+            track(Some("   ")),
+            "an album artist of only spaces is none at all, not a third record"
+        );
     }
 }

@@ -29,6 +29,12 @@ const COVER_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 /// fooled by an album called `A/B`.
 const SEPARATOR: char = '\u{001F}';
 
+/// A tag that actually says something, or nothing at all. A tag of only
+/// spaces is the same as a missing one everywhere here.
+fn named(tag: Option<&str>) -> Option<&str> {
+    tag.map(str::trim).filter(|it| !it.is_empty())
+}
+
 /// A cover, ready to be served.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cover {
@@ -59,14 +65,14 @@ impl Key {
         album: Option<&str>,
         path: &str,
     ) -> Self {
-        let named = album_artist
-            .or(artist)
-            .map(str::trim)
-            .filter(|it| !it.is_empty());
-        let album = album.map(str::trim).filter(|it| !it.is_empty());
+        // Each is trimmed before the choice, not after: an album artist of
+        // only spaces is not an album artist, and must fall through to the
+        // performer rather than win and then vanish.
+        let by = named(album_artist).or_else(|| named(artist));
+        let album = named(album);
         match album {
             Some(album) => Key::Album {
-                artist: named.unwrap_or_default().to_owned(),
+                artist: by.unwrap_or_default().to_owned(),
                 album: album.to_owned(),
             },
             None => Key::Track {

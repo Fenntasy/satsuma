@@ -119,6 +119,7 @@ pub fn run() {
             commands::pick_folder,
             commands::start_scan,
             commands::library_rows,
+            commands::track_details,
             commands::list_playlists,
             commands::create_playlist,
             commands::rename_playlist,
