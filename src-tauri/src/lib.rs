@@ -1,6 +1,7 @@
 //! Satsuma desktop backend.
 
 pub mod commands;
+pub mod cover;
 pub mod db;
 pub mod grouping;
 pub mod player;
@@ -87,6 +88,25 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        // Covers are served rather than sent: the bytes stay out of the
+        // IPC messages, and the webview keeps the one it has instead of
+        // asking again for every track of the same record.
+        .register_asynchronous_uri_scheme_protocol("satsuma-cover", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let path = request.uri().path().to_owned();
+            // Off the main thread: this reads a tag out of a music file,
+            // which is not something to do while the window waits.
+            std::thread::spawn(move || {
+                let state = app.state::<AppState>();
+                // The library is locked only to work out which files to
+                // open. Reading them is done after the lock is let go, so
+                // a cover on a slow disk cannot stall every other command
+                // and the scanner with it.
+                responder.respond(cover::respond(&path, |key| {
+                    state.with_library(|db| cover::candidates(db, key))
+                }));
+            });
+        })
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -105,6 +125,7 @@ pub fn run() {
             commands::pick_folder,
             commands::start_scan,
             commands::library_rows,
+            commands::track_details,
             commands::list_playlists,
             commands::create_playlist,
             commands::rename_playlist,

@@ -30,8 +30,14 @@ export function installTauriStub(seed = {}) {
       callbacks.delete(id);
     },
 
-    convertFileSrc(path) {
-      return path;
+    /**
+     * The host turns a path into a URL on the given custom protocol. This
+     * is the spelling macOS and Linux use; Windows uses
+     * `http://<protocol>.localhost/<path>` instead, which is the whole
+     * reason the frontend asks rather than building the URL itself.
+     */
+    convertFileSrc(path, protocol = "asset") {
+      return `${protocol}://localhost/${encodeURIComponent(path)}`;
     },
 
     invoke(command, args) {

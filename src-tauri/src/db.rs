@@ -106,6 +106,30 @@ pub struct LibraryRow {
     pub duration_ms: u64,
 }
 
+/// Everything the now-playing panel shows about one track.
+///
+/// Its own shape rather than a [`LibraryRow`]: the panel wants the year and
+/// the album artist, which no table needs, and none of it belongs in the
+/// player state event that fires five times a second.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackDetails {
+    pub id: i64,
+    pub path: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub year: Option<u32>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    /// Stars from 1 to 5.
+    pub rating: Option<u8>,
+    /// The grouping tag as the file spells it.
+    pub grouping: Option<String>,
+    pub duration_ms: u64,
+}
+
 /// A file as recorded by the last scan, used to skip unchanged files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileStamp {
@@ -426,6 +450,77 @@ impl Db {
             params![id, stars],
         )?;
         Ok(())
+    }
+
+    /// Everything the now-playing panel shows about one track, or `None`
+    /// when no track has that id any more.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on query failure.
+    pub fn track_details(&self, id: i64) -> Result<Option<TrackDetails>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, path, title, artist, album_artist, album, genre, year,
+                    track_number, disc_number, rating, grouping_raw, duration_ms
+             FROM tracks WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query([id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(TrackDetails {
+            id: row.get(0)?,
+            path: row.get(1)?,
+            title: row.get(2)?,
+            artist: row.get(3)?,
+            album_artist: row.get(4)?,
+            album: row.get(5)?,
+            genre: row.get(6)?,
+            year: row.get(7)?,
+            track_number: row.get(8)?,
+            disc_number: row.get(9)?,
+            rating: row.get(10)?,
+            grouping: row.get(11)?,
+            duration_ms: row.get::<_, i64>(12)?.try_into().unwrap_or(0),
+        }))
+    }
+
+    /// A track of this album whose file is known to hold a picture.
+    ///
+    /// The scan already recorded which files do, so the one worth opening
+    /// for a cover is looked up rather than found by opening several.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on query failure.
+    pub fn album_track_with_cover(&self, artist: &str, album: &str) -> Result<Option<String>> {
+        self.album_track_where(artist, album, "AND has_embedded_cover = 1")
+    }
+
+    /// Any track of this album, for looking beside the music.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on query failure.
+    pub fn album_track(&self, artist: &str, album: &str) -> Result<Option<String>> {
+        self.album_track_where(artist, album, "")
+    }
+
+    /// An album is matched on the album artist, falling back to the track
+    /// artist, which is how the cover key is built. An album with no artist
+    /// at all matches the tracks that have none either, rather than every
+    /// album of that name.
+    fn album_track_where(&self, artist: &str, album: &str, extra: &str) -> Result<Option<String>> {
+        let sql = format!(
+            "SELECT path FROM tracks
+             WHERE COALESCE(NULLIF(TRIM(album_artist), ''), NULLIF(TRIM(artist), ''), '') = ?1
+               AND TRIM(album) = ?2 {extra}
+             ORDER BY disc_number, track_number, path
+             LIMIT 1"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let mut rows = stmt.query((artist, album))?;
+        Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
     }
 
     /// The tracks with these ids, in the order they were asked for. Ids

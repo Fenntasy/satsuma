@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 const FORWARDED_EVENTS = [
@@ -7,6 +7,7 @@ const FORWARDED_EVENTS = [
   "player://state",
 ];
 
+const COVER_PROTOCOL = "satsuma-cover";
 const THEME_KEY = "satsuma.theme";
 const WIDTHS_KEY = "satsuma.columnWidths";
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -105,6 +106,10 @@ export async function start(Elm, node) {
     flags: {
       theme: readTheme(),
       systemDark: darkQuery.matches,
+      // A custom-protocol URL is spelled `scheme://localhost/` on macOS
+      // and Linux but `http://scheme.localhost/` on Windows. Only the
+      // host knows which, so Elm is handed the answer rather than a rule.
+      coverBase: convertFileSrc("", COVER_PROTOCOL),
       widths: readWidths(),
     },
   });

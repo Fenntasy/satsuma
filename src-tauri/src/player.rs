@@ -671,34 +671,45 @@ mod tests {
 
     #[test]
     fn plays_a_real_file_and_moves_through_the_queue() {
-        let played = with_audio(vec![fixture(1), fixture(2)], |sender, states| {
-            let playing = wait_for(states, Duration::from_secs(5), |state| {
-                state.status == Status::Playing && state.track.is_some()
-            })
-            .expect("the first track must start playing");
-            assert_eq!(playing.track.as_ref().map(|track| track.id), Some(1));
+        // Repeating, so the music cannot run out from under the test. Both
+        // fixtures are a second long, and a machine slow enough to let the
+        // second one finish before `PlayPause` is handled finds the player
+        // stopped — where pausing starts it again instead, and the wait
+        // for `Paused` times out. That is a slow continuous integration
+        // machine, and it failed there while passing twelve times out of
+        // twelve here.
+        let played = with_audio_setup(
+            vec![Command::SetRepeat(Repeat::Queue)],
+            vec![fixture(1), fixture(2)],
+            |sender, states| {
+                let playing = wait_for(states, Duration::from_secs(5), |state| {
+                    state.status == Status::Playing && state.track.is_some()
+                })
+                .expect("the first track must start playing");
+                assert_eq!(playing.track.as_ref().map(|track| track.id), Some(1));
 
-            // The one-second fixture ends on its own and the queue moves on.
-            let second = wait_for(states, Duration::from_secs(10), |state| {
-                state.track.as_ref().is_some_and(|track| track.id == 2)
-            })
-            .expect("the queue must advance when a track ends");
-            assert_eq!(second.status, Status::Playing);
+                // The one-second fixture ends on its own and the queue moves on.
+                let second = wait_for(states, Duration::from_secs(10), |state| {
+                    state.track.as_ref().is_some_and(|track| track.id == 2)
+                })
+                .expect("the queue must advance when a track ends");
+                assert_eq!(second.status, Status::Playing);
 
-            sender.send(Command::PlayPause).expect("send");
-            let paused = wait_for(states, Duration::from_secs(5), |state| {
-                state.status == Status::Paused
-            })
-            .expect("pausing must take effect");
-            assert!(paused.track.is_some(), "a paused player keeps its track");
+                sender.send(Command::PlayPause).expect("send");
+                let paused = wait_for(states, Duration::from_secs(5), |state| {
+                    state.status == Status::Paused
+                })
+                .expect("pausing must take effect");
+                assert!(paused.track.is_some(), "a paused player keeps its track");
 
-            sender.send(Command::Stop).expect("send");
-            let stopped = wait_for(states, Duration::from_secs(5), |state| {
-                state.status == Status::Stopped
-            })
-            .expect("stopping must take effect");
-            assert_eq!(stopped.track, None, "nothing plays once stopped");
-        });
+                sender.send(Command::Stop).expect("send");
+                let stopped = wait_for(states, Duration::from_secs(5), |state| {
+                    state.status == Status::Stopped
+                })
+                .expect("stopping must take effect");
+                assert_eq!(stopped.track, None, "nothing plays once stopped");
+            },
+        );
         if played.is_none() {
             eprintln!("skipped: this machine has no audio output");
         }
