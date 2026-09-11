@@ -242,6 +242,18 @@ pub fn candidates(db: &Db, key: &Key) -> DbResult<Candidates> {
             with_picture: db.album_track_with_cover(artist, album)?,
             beside: db.album_track(artist, album)?,
         }),
+        // The path is taken as given rather than checked against the
+        // library, which means this arm will open a file the library does
+        // not know. Considered and left as it is: only Elm builds these
+        // URLs and the CSP says who may ask for them, so reaching it needs
+        // a webview already under someone else's control.
+        //
+        // The check to add, when one is added, is not "is this file in the
+        // library" but "is this a file we are handling". Those are the same
+        // set only until a file can be played without being scanned first,
+        // and at that point the set is the library plus the player's queue.
+        // Narrowing it to the library now would leave that feature playing
+        // music under a blank sleeve.
         Key::Track { path } => Ok(Candidates {
             with_picture: Some(path.clone()),
             beside: Some(path.clone()),
