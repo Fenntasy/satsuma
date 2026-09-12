@@ -287,6 +287,25 @@ fn is_harmless_walk_error(err: &walkdir::Error) -> bool {
             .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// The stamp of a file named directly, for something that already knows
+/// which file it wants.
+///
+/// Shares [`seconds_since_epoch`] with the scan on purpose: a stamp
+/// written in a different spelling of the same instant would make every
+/// later scan believe the file had changed.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be asked about.
+pub fn stamp_of_path(path: &Path) -> std::io::Result<FileStamp> {
+    let metadata = std::fs::metadata(path)?;
+    Ok(FileStamp {
+        path: path.to_string_lossy().into_owned(),
+        mtime: seconds_since_epoch(metadata.modified()?),
+        size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+    })
+}
+
 fn stamp_of(entry: &walkdir::DirEntry) -> Stamped {
     let metadata = match entry.metadata() {
         Ok(metadata) => metadata,

@@ -452,6 +452,55 @@ impl Db {
         Ok(())
     }
 
+    /// Replaces the cached tags of a track with what the file now says.
+    ///
+    /// An update rather than an upsert: the row has to be there already.
+    /// A file that is not in the library must not gain a row because
+    /// something wrote tags to it.
+    ///
+    /// The stamp goes in with the tags. Writing a file changes its
+    /// modification time, and a stamp left behind would make the next scan
+    /// read the whole file again to learn what it was just told.
+    ///
+    /// Answers whether a row was there to update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on query failure.
+    pub fn update_tags(&self, id: i64, tags: &TrackTags, stamp: &FileStamp) -> Result<bool> {
+        let (kind, volume, vibe) = tags.grouping.unwrap_or_default().stored_names();
+        let changed = self.conn.execute(
+            "UPDATE tracks SET
+                mtime = ?2, size = ?3, title = ?4, artist = ?5, album = ?6,
+                album_artist = ?7, track_number = ?8, disc_number = ?9,
+                genre = ?10, year = ?11, duration_ms = ?12, rating = ?13,
+                grouping_raw = ?14, grouping_kind = ?15, grouping_volume = ?16,
+                grouping_vibe = ?17, has_embedded_cover = ?18
+             WHERE id = ?1",
+            params![
+                id,
+                stamp.mtime,
+                stamp.size,
+                tags.title,
+                tags.artist,
+                tags.album,
+                tags.album_artist,
+                tags.track_number,
+                tags.disc_number,
+                tags.genre,
+                tags.year,
+                i64::try_from(tags.duration_ms).unwrap_or(i64::MAX),
+                tags.rating,
+                tags.grouping_raw,
+                kind,
+                volume,
+                vibe,
+                tags.has_embedded_cover,
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Everything the now-playing panel shows about one track, or `None`
     /// when no track has that id any more.
     ///
