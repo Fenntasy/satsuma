@@ -1495,12 +1495,34 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (state, ids) = library_of(dir.path(), &["one.mp3"]);
         let track = state.with_db(|db| db.tracks_by_ids(&ids)).expect("tracks")[0].clone();
+        // Pushed into the past, so the write has to move it by something
+        // no clock granularity can hide. A stamp is whole seconds, and the
+        // copy and the edit happen inside the same one.
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&track.path)
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("set the modification time");
+        let before = crate::scanner::stamp_of_path(Path::new(&track.path)).expect("stamp");
+        state
+            .with_db(|db| {
+                db.update_tags(
+                    track.id,
+                    &crate::tags::read_tags(Path::new(&track.path)).expect("read"),
+                    &before,
+                )
+            })
+            .expect("seed the stale stamp");
 
         super::apply_edit(
             &state,
             &track,
             &TagEdit {
-                title: Change::Set("Something Else Entirely".to_owned()),
+                // The same length as the title it replaces: a longer one
+                // changes the file's size, and the size alone would carry
+                // the assertion while the time sat still.
+                title: Change::Set("Purple Sky".to_owned()),
                 ..TagEdit::default()
             },
         )
@@ -1517,6 +1539,11 @@ mod tests {
             (cached.mtime, cached.size),
             (on_disk.mtime, on_disk.size),
             "the cached stamp must match the file the edit left behind"
+        );
+        assert_ne!(
+            cached.mtime, before.mtime,
+            "and must actually have moved: a stamp that was never touched \
+             matches a file that was never written either"
         );
     }
 
@@ -1541,9 +1568,13 @@ mod tests {
         let outcomes = super::apply_to_all(&state, &tracks, &edit);
 
         assert!(outcomes[0].error.is_none(), "{:?}", outcomes[0].error);
+        let refused = outcomes[1].error.as_deref().unwrap_or_default();
         assert!(
-            outcomes[1].error.is_some(),
-            "a file that cannot be written has to say so"
+            refused.starts_with("cannot write") && refused.contains(&tracks[1].path),
+            "the failure has to be the write this test set up, and has to \
+             name the file: any other error would satisfy `is_err` just as \
+             well, and the nine lines of permissions above would be \
+             proving nothing. Got: {refused}"
         );
         assert!(outcomes[2].error.is_none(), "{:?}", outcomes[2].error);
 

@@ -632,9 +632,17 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = tagged_copy(dir.path(), "untouched.mp3", &sample_tag());
         let before = read_tags(&path).expect("read");
-        let written_at = std::fs::metadata(&path)
-            .and_then(|it| it.modified())
-            .expect("metadata");
+        // Pushed into the past first. The file system's clock is coarse —
+        // whole jiffies on the Linux that gates this branch — so a file
+        // rewritten immediately after being written keeps the same
+        // timestamp, and comparing before and after would prove nothing
+        // there even though it does here.
+        let written_at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(written_at))
+            .expect("set the modification time");
 
         write_tags(&path, &TagEdit::default()).expect("write");
 
