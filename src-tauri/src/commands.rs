@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,9 @@ pub const SCAN_PROGRESS_EVENT: &str = "library://scan-progress";
 pub const SCAN_FINISHED_EVENT: &str = "library://scan-finished";
 pub const PLAYER_STATE_EVENT: &str = "player://state";
 pub const LIBRARY_CHANGED_EVENT: &str = "library://changed";
+
+/// The last change token handed out, so no two are ever the same.
+static LAST_TOKEN: AtomicU64 = AtomicU64::new(0);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Whether a scan is running, and whether another one was asked for while
@@ -615,14 +619,40 @@ pub fn edit_tags(
     ids: Vec<i64>,
     edit: TagEdit,
 ) -> Result<Vec<EditOutcome>, String> {
-    let tracks = state.with_db(|db| db.tracks_by_ids(&ids))?;
-    let outcomes = apply_to_all(&state, &tracks, &edit);
+    let outcomes = edit_all(&state, &ids, &edit)?;
     // Told once for the whole edit rather than once a track: the panels
     // reload the library, and doing that a hundred times over would be a
     // hundred full reads.
     if outcomes.iter().any(|outcome| outcome.error.is_none()) {
         emit(&app, LIBRARY_CHANGED_EVENT, &Changed::now());
     }
+    Ok(outcomes)
+}
+
+/// Applies the edit to every id asked about, and answers for each of them.
+///
+/// Separate from the command so that a test drives this instead of its own
+/// copy of it: a test that repeats the loop passes whatever the real one
+/// does.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read.
+fn edit_all(state: &AppState, ids: &[i64], edit: &TagEdit) -> Result<Vec<EditOutcome>, String> {
+    let tracks = state.with_db(|db| db.tracks_by_ids(ids))?;
+    let mut outcomes = apply_to_all(state, &tracks, edit);
+    // An id with no row is skipped by the lookup, so without this it gets
+    // no outcome at all and the caller cannot tell it from a success. The
+    // row disappearing mid-edit is already reported; the row never having
+    // been there must be too.
+    outcomes.extend(
+        ids.iter()
+            .filter(|id| !tracks.iter().any(|track| track.id == **id))
+            .map(|id| EditOutcome {
+                id: *id,
+                error: Some("that track is not in the library any more".to_owned()),
+            }),
+    );
     Ok(outcomes)
 }
 
@@ -679,16 +709,25 @@ pub struct Changed {
 
 impl Changed {
     fn now() -> Self {
-        Changed {
-            // The clock rather than a counter: a counter starts again at
-            // zero when the application does, and would hand out tokens a
-            // webview cache has already seen.
-            token: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| {
-                    u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-                }),
-        }
+        // The clock rather than a counter: a counter starts again at zero
+        // when the application does, and would hand out tokens a webview
+        // cache has already seen.
+        let clock = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        // And never the same token twice. Milliseconds are far too coarse
+        // for two edits in a row — every one of a thousand back to back
+        // shared a millisecond — and a clock that steps backwards would
+        // repeat them by the handful. Whichever is greater keeps the
+        // clock's meaning and the counter's promise.
+        let token = LAST_TOKEN
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+                Some(clock.max(last.saturating_add(1)))
+            })
+            .unwrap_or(clock);
+        Changed { token }
     }
 }
 
@@ -1618,14 +1657,41 @@ mod tests {
     }
 
     #[test]
-    fn a_change_carries_a_token_that_moves() {
-        // The cover of an album is served under a key built from its name,
-        // so renaming the album leaves the URL identical and the webview
-        // goes on showing the sleeve it kept. The token is what makes the
-        // next request a different one.
-        let first = super::Changed::now().token;
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let second = super::Changed::now().token;
-        assert!(second > first, "{first} then {second}");
+    fn no_two_changes_carry_the_same_token() {
+        // Back to back, with no sleep: milliseconds are far too coarse to
+        // tell two edits apart, and a token the webview has already seen
+        // leaves the old sleeve on screen, which is the one thing the
+        // token exists to prevent.
+        let tokens: Vec<u64> = (0..1000).map(|_| super::Changed::now().token).collect();
+        let mut sorted = tokens.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), tokens.len(), "every token has to be its own");
+        assert!(
+            tokens.windows(2).all(|pair| pair[1] > pair[0]),
+            "and they have to keep going up"
+        );
+    }
+
+    #[test]
+    fn an_id_that_is_not_in_the_library_is_reported_rather_than_dropped() {
+        // The lookup skips an id with no row, so without saying something
+        // the caller gets fewer answers than it asked questions and cannot
+        // tell which of its tracks was quietly left out.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, ids) = library_of(dir.path(), &["one.mp3"]);
+        let asked: Vec<i64> = vec![ids[0], 9999];
+
+        let outcomes = super::edit_all(&state, &asked, &TagEdit::default()).expect("edit");
+
+        assert_eq!(outcomes.len(), asked.len(), "one answer per id asked about");
+        let gone = outcomes
+            .iter()
+            .find(|it| it.id == 9999)
+            .expect("the stale id");
+        assert_eq!(
+            gone.error.as_deref(),
+            Some("that track is not in the library any more")
+        );
     }
 }

@@ -102,6 +102,38 @@ impl TagEdit {
     }
 }
 
+/// Makes sure the file has a primary tag to write into, without losing
+/// what it already says.
+///
+/// A file may carry a tag that is not the primary kind for its format: an
+/// MP3 with only an `ID3v1` tag, or only an APE one. Inserting an empty
+/// primary tag beside it and writing one field into that leaves a file
+/// whose title, artist and album have apparently vanished, because
+/// [`read_tags`] prefers the primary tag from then on. The words are still
+/// in the old tag, but nothing reads them again, and a rescan cannot bring
+/// them back.
+///
+/// So a new primary tag starts as a copy of what the file already has.
+/// `re_map` drops the items the new kind cannot hold, which is a real loss
+/// but a smaller one than dropping all of them.
+fn primary_tag_to_write(tagged: &mut lofty::file::TaggedFile) -> Option<&mut Tag> {
+    use lofty::file::TaggedFileExt as _;
+
+    let tag_type = tagged.primary_tag_type();
+    if TaggedFileExt::primary_tag(tagged).is_none() {
+        let seed = match TaggedFileExt::first_tag(tagged) {
+            Some(existing) => {
+                let mut carried = existing.clone();
+                carried.re_map(tag_type);
+                carried
+            }
+            None => Tag::new(tag_type),
+        };
+        tagged.insert_tag(seed);
+    }
+    tagged.primary_tag_mut()
+}
+
 /// Writes a star rating into the file, so the rating lives with the music
 /// rather than only in the cache.
 ///
@@ -120,10 +152,7 @@ pub fn write_rating(path: &Path, stars: Option<u8>) -> Result<(), TagError> {
         source,
     })?;
     let tag_type = tagged.primary_tag_type();
-    if tagged.primary_tag_mut().is_none() {
-        tagged.insert_tag(Tag::new(tag_type));
-    }
-    let tag = tagged.primary_tag_mut().ok_or_else(|| TagError::Write {
+    let tag = primary_tag_to_write(&mut tagged).ok_or_else(|| TagError::Write {
         path: path.display().to_string(),
         message: "the file holds no tag that could be written".to_owned(),
     })?;
@@ -181,10 +210,7 @@ pub fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), TagError> {
         source,
     })?;
     let tag_type = tagged.primary_tag_type();
-    if tagged.primary_tag_mut().is_none() {
-        tagged.insert_tag(Tag::new(tag_type));
-    }
-    let tag = tagged.primary_tag_mut().ok_or_else(|| TagError::Write {
+    let tag = primary_tag_to_write(&mut tagged).ok_or_else(|| TagError::Write {
         path: path.display().to_string(),
         message: "the file holds no tag that could be written".to_owned(),
     })?;
@@ -392,7 +418,9 @@ pub(crate) mod tests {
     use lofty::tag::items::Timestamp;
     use lofty::tag::{Tag, TagType};
 
-    use super::{is_audio_file, read_tags, write_tags, Change, TagEdit, TagError, TrackTags};
+    use super::{
+        is_audio_file, read_tags, write_rating, write_tags, Change, TagEdit, TagError, TrackTags,
+    };
     use crate::grouping::{Grouping, Kind, Vibe, Volume};
 
     pub(crate) const FIXTURE: &str =
@@ -867,5 +895,82 @@ pub(crate) mod tests {
             matches!(&error, TagError::Read { path, .. } if path == "/definitely/missing.mp3"),
             "expected a read error naming the file, got {error:?}"
         );
+    }
+
+    /// A copy of the fixture carrying an `ID3v1` tag and nothing else.
+    ///
+    /// The fixture itself starts with an `ID3` header, so saving a v1 tag
+    /// onto a copy leaves a file with both and the interesting branch is
+    /// never taken. The v2 header is cut off first.
+    fn id3v1_only(dir: &Path, name: &str) -> PathBuf {
+        let raw = std::fs::read(FIXTURE).expect("read fixture");
+        assert_eq!(&raw[..3], b"ID3", "the fixture is expected to carry ID3v2");
+        // Syncsafe size of the v2 tag, plus its ten byte header.
+        let size = usize::from(raw[6]) << 21
+            | usize::from(raw[7]) << 14
+            | usize::from(raw[8]) << 7
+            | usize::from(raw[9]);
+        let path = dir.join(name);
+        std::fs::write(&path, &raw[10 + size..]).expect("write");
+
+        let mut tag = Tag::new(TagType::Id3v1);
+        tag.set_title("Orange Sun".into());
+        tag.set_artist("The Satsumas".into());
+        tag.set_album("Citrus".into());
+        tag.save_to_path(&path, WriteOptions::default())
+            .expect("write the v1 tag");
+        path
+    }
+
+    #[test]
+    fn a_file_tagged_the_old_way_does_not_lose_what_it_says() {
+        // A file whose only tag is not the primary kind for its format.
+        // Writing one field used to put an empty ID3v2 tag beside the v1
+        // one, and `read_tags` prefers the primary tag from then on: the
+        // title, artist and album were still in the file and never read
+        // again, which no rescan could undo.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = id3v1_only(dir.path(), "old.mp3");
+        let before = read_tags(&path).expect("read");
+        assert_eq!(before.title.as_deref(), Some("Orange Sun"));
+
+        write_tags(
+            &path,
+            &TagEdit {
+                genre: Change::Set("Jazz".to_owned()),
+                ..TagEdit::default()
+            },
+        )
+        .expect("write");
+
+        let after = read_tags(&path).expect("read");
+        assert_eq!(after.genre.as_deref(), Some("Jazz"), "the edit landed");
+        assert_eq!(
+            after.title.as_deref(),
+            Some("Orange Sun"),
+            "and the rest survived"
+        );
+        assert_eq!(after.artist.as_deref(), Some("The Satsumas"));
+        assert_eq!(after.album.as_deref(), Some("Citrus"));
+    }
+
+    #[test]
+    fn rating_a_file_tagged_the_old_way_does_not_lose_what_it_says() {
+        // The same fault, in the function that has been shipped since the
+        // playlist panel. One star click used to empty the row.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = id3v1_only(dir.path(), "old.mp3");
+
+        write_rating(&path, Some(4)).expect("rate");
+
+        let after = read_tags(&path).expect("read");
+        assert_eq!(after.rating, Some(4), "the rating landed");
+        assert_eq!(
+            after.title.as_deref(),
+            Some("Orange Sun"),
+            "and the rest survived"
+        );
+        assert_eq!(after.artist.as_deref(), Some("The Satsumas"));
+        assert_eq!(after.album.as_deref(), Some("Citrus"));
     }
 }
