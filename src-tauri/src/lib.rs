@@ -126,6 +126,7 @@ pub fn run() {
             commands::start_scan,
             commands::library_rows,
             commands::track_details,
+            commands::edit_tags,
             commands::list_playlists,
             commands::create_playlist,
             commands::rename_playlist,

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -14,10 +15,15 @@ use crate::player::{self, Handle};
 use crate::queue::Repeat;
 use crate::scanner::{self, ScanProgress, ScanReport};
 use crate::settings;
+use crate::tags::TagEdit;
 
 pub const SCAN_PROGRESS_EVENT: &str = "library://scan-progress";
 pub const SCAN_FINISHED_EVENT: &str = "library://scan-finished";
 pub const PLAYER_STATE_EVENT: &str = "player://state";
+pub const LIBRARY_CHANGED_EVENT: &str = "library://changed";
+
+/// The last change token handed out, so no two are ever the same.
+static LAST_TOKEN: AtomicU64 = AtomicU64::new(0);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Whether a scan is running, and whether another one was asked for while
@@ -582,6 +588,149 @@ fn now_playing(track: TrackDetails) -> NowPlaying {
     }
 }
 
+/// What happened to one track of an edit.
+///
+/// Files fail one at a time — read-only, locked, moved since the scan —
+/// and the rest must still be written. So every track answers for itself
+/// rather than one failure losing the whole edit.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EditOutcome {
+    pub id: i64,
+    /// `None` when the track was written and its cache refreshed.
+    pub error: Option<String>,
+}
+
+/// Applies one edit to every track named, writing the files and then
+/// re-reading them into the cache.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read. A file that cannot
+/// be written is not an error of the command: it is reported against its
+/// own track, and the others are still written.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands a command its State by value"
+)]
+pub fn edit_tags(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    edit: TagEdit,
+) -> Result<Vec<EditOutcome>, String> {
+    let outcomes = edit_all(&state, &ids, &edit)?;
+    // Told once for the whole edit rather than once a track: the panels
+    // reload the library, and doing that a hundred times over would be a
+    // hundred full reads.
+    if outcomes.iter().any(|outcome| outcome.error.is_none()) {
+        emit(&app, LIBRARY_CHANGED_EVENT, &Changed::now());
+    }
+    Ok(outcomes)
+}
+
+/// Applies the edit to every id asked about, and answers for each of them.
+///
+/// Separate from the command so that a test drives this instead of its own
+/// copy of it: a test that repeats the loop passes whatever the real one
+/// does.
+///
+/// # Errors
+///
+/// Returns a message when the library cannot be read.
+fn edit_all(state: &AppState, ids: &[i64], edit: &TagEdit) -> Result<Vec<EditOutcome>, String> {
+    let tracks = state.with_db(|db| db.tracks_by_ids(ids))?;
+    let mut outcomes = apply_to_all(state, &tracks, edit);
+    // An id with no row is skipped by the lookup, so without this it gets
+    // no outcome at all and the caller cannot tell it from a success. The
+    // row disappearing mid-edit is already reported; the row never having
+    // been there must be too.
+    outcomes.extend(
+        ids.iter()
+            .filter(|id| !tracks.iter().any(|track| track.id == **id))
+            .map(|id| EditOutcome {
+                id: *id,
+                error: Some("that track is not in the library any more".to_owned()),
+            }),
+    );
+    Ok(outcomes)
+}
+
+/// Applies the edit to every track, and answers for each of them.
+///
+/// Separate from the command so that it can be tested: a test that walked
+/// the tracks itself would be testing its own copy of this loop, and would
+/// go on passing if this one stopped at the first file that refused.
+fn apply_to_all(state: &AppState, tracks: &[crate::db::Track], edit: &TagEdit) -> Vec<EditOutcome> {
+    tracks
+        .iter()
+        .map(|track| EditOutcome {
+            id: track.id,
+            error: apply_edit(state, track, edit).err(),
+        })
+        .collect()
+}
+
+/// Writes one track's file and puts what the file then says into the
+/// cache.
+fn apply_edit(state: &AppState, track: &crate::db::Track, edit: &TagEdit) -> Result<(), String> {
+    let path = std::path::Path::new(&track.path);
+    crate::tags::write_tags(path, edit).map_err(|err| err.to_string())?;
+    // Read back rather than assumed: what the file says now is what the
+    // cache must hold, and a tag the format spells its own way would
+    // otherwise leave the two disagreeing.
+    let tags = crate::tags::read_tags(path).map_err(|err| err.to_string())?;
+    let stamp = scanner::stamp_of_path(path).map_err(|err| err.to_string())?;
+    let found = state.with_db(|db| db.update_tags(track.id, &tags, &stamp))?;
+    missing_track_unless(found)
+}
+
+/// Turns "no row was updated" into an error, the way a playlist change
+/// that matched nothing is one.
+fn missing_track_unless(found: bool) -> Result<(), String> {
+    if found {
+        Ok(())
+    } else {
+        Err("that track is not in the library any more".to_owned())
+    }
+}
+
+/// Says that the library changed, and carries something the frontend can
+/// put in a cover URL.
+///
+/// A cover is served under a key built from the album, so renaming an
+/// album does not change the URL and the webview goes on showing the
+/// sleeve it kept. The token does change, and appending it makes the
+/// request a new one.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Changed {
+    pub token: u64,
+}
+
+impl Changed {
+    fn now() -> Self {
+        // The clock rather than a counter: a counter starts again at zero
+        // when the application does, and would hand out tokens a webview
+        // cache has already seen.
+        let clock = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        // And never the same token twice. Milliseconds are far too coarse
+        // for two edits in a row — every one of a thousand back to back
+        // shared a millisecond — and a clock that steps backwards would
+        // repeat them by the handful. Whichever is greater keeps the
+        // clock's meaning and the counter's promise.
+        let token = LAST_TOKEN
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+                Some(clock.max(last.saturating_add(1)))
+            })
+            .unwrap_or(clock);
+        Changed { token }
+    }
+}
+
 /// Everything the library tree groups by, for every track.
 ///
 /// # Errors
@@ -857,6 +1006,7 @@ fn emit<T: serde::Serialize + Clone>(app: &AppHandle, event: &str, payload: &T) 
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::mpsc;
 
     use super::{next_playlist_id, ping_reply, AppState, ScanOutcome, ScanStatus};
@@ -865,6 +1015,7 @@ mod tests {
     use crate::scanner::ScanReport;
     use crate::settings;
     use crate::tags::TrackTags;
+    use crate::tags::{Change, TagEdit};
 
     fn playlist(id: u32) -> settings::Playlist {
         settings::Playlist {
@@ -882,6 +1033,12 @@ mod tests {
             dir.join("settings.json"),
             Handle::new(sender),
         )
+    }
+
+    /// As [`state`], for a library that already holds tracks.
+    fn state_with(db: Db, dir: &std::path::Path) -> AppState {
+        let (sender, _receiver) = mpsc::channel();
+        AppState::new(db, dir.join("settings.json"), Handle::new(sender))
     }
 
     fn library_row(id: i64, path: &str) -> crate::db::LibraryRow {
@@ -1278,6 +1435,263 @@ mod tests {
             track(None),
             track(Some("   ")),
             "an album artist of only spaces is none at all, not a third record"
+        );
+    }
+
+    // EDITING TAGS
+
+    /// A library holding real copies of the fixture, so an edit has files
+    /// to write to.
+    fn library_of(dir: &Path, names: &[&str]) -> (AppState, Vec<i64>) {
+        let db = Db::open_in_memory().expect("db");
+        let folder = db
+            .add_folder(dir.to_str().expect("utf-8"))
+            .expect("add folder");
+        let records: Vec<TrackRecord> = names
+            .iter()
+            .map(|name| {
+                let path =
+                    crate::tags::tests::tagged_copy(dir, name, &crate::tags::tests::sample_tag());
+                TrackRecord {
+                    folder_id: folder.id,
+                    stamp: crate::scanner::stamp_of_path(&path).expect("stamp"),
+                    tags: crate::tags::read_tags(&path).expect("read"),
+                }
+            })
+            .collect();
+        db.upsert_tracks(&records).expect("upsert");
+        let ids = db
+            .library_rows()
+            .expect("rows")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        (state_with(db, dir), ids)
+    }
+
+    #[test]
+    fn an_edit_reaches_the_file_and_then_the_cache() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, ids) = library_of(dir.path(), &["one.mp3"]);
+
+        super::apply_edit(
+            &state,
+            &state.with_db(|db| db.tracks_by_ids(&ids)).expect("tracks")[0],
+            &TagEdit {
+                genre: Change::Set("Jazz".to_owned()),
+                ..TagEdit::default()
+            },
+        )
+        .expect("edit");
+
+        let row = &state.with_db(Db::library_rows).expect("rows")[0];
+        assert_eq!(row.genre.as_deref(), Some("Jazz"), "the cache must follow");
+        assert_eq!(
+            crate::tags::read_tags(Path::new(&row.path))
+                .expect("read")
+                .genre
+                .as_deref(),
+            Some("Jazz"),
+            "and the file is where it actually went"
+        );
+    }
+
+    #[test]
+    fn the_cache_is_filled_from_the_file_rather_than_from_the_edit() {
+        // The edit says what to write; the file says what was written, and
+        // they are not always the same thing. A grouping with nothing in
+        // it is asked for as a grouping and ends up as no tag at all, so a
+        // cache filled from the edit would claim a grouping the file does
+        // not have.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, ids) = library_of(dir.path(), &["one.mp3"]);
+        let track = state.with_db(|db| db.tracks_by_ids(&ids)).expect("tracks")[0].clone();
+
+        super::apply_edit(
+            &state,
+            &track,
+            &TagEdit {
+                grouping: Change::Set(crate::grouping::Grouping::default()),
+                ..TagEdit::default()
+            },
+        )
+        .expect("edit");
+
+        let row = &state.with_db(Db::library_rows).expect("rows")[0];
+        assert_eq!(
+            row.grouping, None,
+            "the file has no grouping, nor may the cache: filled from the \
+             edit it would record the `/ /` that was asked for and never \
+             written"
+        );
+    }
+
+    #[test]
+    fn the_stamp_moves_with_the_tags() {
+        // A write changes the file's modification time. A stamp left
+        // behind would make the next scan read the whole file again to
+        // learn what it has just been told.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, ids) = library_of(dir.path(), &["one.mp3"]);
+        let track = state.with_db(|db| db.tracks_by_ids(&ids)).expect("tracks")[0].clone();
+        // Pushed into the past, so the write has to move it by something
+        // no clock granularity can hide. A stamp is whole seconds, and the
+        // copy and the edit happen inside the same one.
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&track.path)
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("set the modification time");
+        let before = crate::scanner::stamp_of_path(Path::new(&track.path)).expect("stamp");
+        state
+            .with_db(|db| {
+                db.update_tags(
+                    track.id,
+                    &crate::tags::read_tags(Path::new(&track.path)).expect("read"),
+                    &before,
+                )
+            })
+            .expect("seed the stale stamp");
+
+        super::apply_edit(
+            &state,
+            &track,
+            &TagEdit {
+                // The same length as the title it replaces: a longer one
+                // changes the file's size, and the size alone would carry
+                // the assertion while the time sat still.
+                title: Change::Set("Purple Sky".to_owned()),
+                ..TagEdit::default()
+            },
+        )
+        .expect("edit");
+
+        let on_disk = crate::scanner::stamp_of_path(Path::new(&track.path)).expect("stamp");
+        let cached = state
+            .with_db(|db| db.file_stamps(1))
+            .expect("stamps")
+            .into_iter()
+            .next()
+            .expect("a stamp");
+        assert_eq!(
+            (cached.mtime, cached.size),
+            (on_disk.mtime, on_disk.size),
+            "the cached stamp must match the file the edit left behind"
+        );
+        assert_ne!(
+            cached.mtime, before.mtime,
+            "and must actually have moved: a stamp that was never touched \
+             matches a file that was never written either"
+        );
+    }
+
+    #[test]
+    fn one_unwritable_file_does_not_lose_the_rest_of_the_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, ids) = library_of(dir.path(), &["one.mp3", "two.mp3", "three.mp3"]);
+        let tracks = state.with_db(|db| db.tracks_by_ids(&ids)).expect("tracks");
+
+        // The middle one is read-only, which is the ordinary way a file
+        // refuses: a track ripped from a mounted image, or one whose
+        // permissions came across from a backup.
+        let stubborn = Path::new(&tracks[1].path);
+        let mut permissions = std::fs::metadata(stubborn).expect("metadata").permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(stubborn, permissions).expect("set permissions");
+
+        let edit = TagEdit {
+            genre: Change::Set("Jazz".to_owned()),
+            ..TagEdit::default()
+        };
+        let outcomes = super::apply_to_all(&state, &tracks, &edit);
+
+        assert!(outcomes[0].error.is_none(), "{:?}", outcomes[0].error);
+        let refused = outcomes[1].error.as_deref().unwrap_or_default();
+        assert!(
+            refused.starts_with("cannot write") && refused.contains(&tracks[1].path),
+            "the failure has to be the write this test set up, and has to \
+             name the file: any other error would satisfy `is_err` just as \
+             well, and the nine lines of permissions above would be \
+             proving nothing. Got: {refused}"
+        );
+        assert!(outcomes[2].error.is_none(), "{:?}", outcomes[2].error);
+
+        let genres: Vec<Option<String>> = state
+            .with_db(Db::library_rows)
+            .expect("rows")
+            .into_iter()
+            .map(|row| row.genre)
+            .collect();
+        assert_eq!(
+            genres,
+            [
+                Some("Jazz".to_owned()),
+                Some("Indie".to_owned()),
+                Some("Jazz".to_owned())
+            ],
+            "the two that could be written were, and the one that could \
+             not keeps what it had"
+        );
+    }
+
+    #[test]
+    fn an_edit_to_a_track_that_is_gone_is_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, ids) = library_of(dir.path(), &["one.mp3"]);
+        let track = state.with_db(|db| db.tracks_by_ids(&ids)).expect("tracks")[0].clone();
+        state
+            .with_db(|db| db.remove_folder(1))
+            .expect("remove folder");
+
+        let error = super::apply_edit(
+            &state,
+            &track,
+            &TagEdit {
+                genre: Change::Set("Jazz".to_owned()),
+                ..TagEdit::default()
+            },
+        )
+        .expect_err("a track with no row cannot be refreshed");
+        assert_eq!(error, "that track is not in the library any more");
+    }
+
+    #[test]
+    fn no_two_changes_carry_the_same_token() {
+        // Back to back, with no sleep: milliseconds are far too coarse to
+        // tell two edits apart, and a token the webview has already seen
+        // leaves the old sleeve on screen, which is the one thing the
+        // token exists to prevent.
+        let tokens: Vec<u64> = (0..1000).map(|_| super::Changed::now().token).collect();
+        let mut sorted = tokens.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), tokens.len(), "every token has to be its own");
+        assert!(
+            tokens.windows(2).all(|pair| pair[1] > pair[0]),
+            "and they have to keep going up"
+        );
+    }
+
+    #[test]
+    fn an_id_that_is_not_in_the_library_is_reported_rather_than_dropped() {
+        // The lookup skips an id with no row, so without saying something
+        // the caller gets fewer answers than it asked questions and cannot
+        // tell which of its tracks was quietly left out.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, ids) = library_of(dir.path(), &["one.mp3"]);
+        let asked: Vec<i64> = vec![ids[0], 9999];
+
+        let outcomes = super::edit_all(&state, &asked, &TagEdit::default()).expect("edit");
+
+        assert_eq!(outcomes.len(), asked.len(), "one answer per id asked about");
+        let gone = outcomes
+            .iter()
+            .find(|it| it.id == 9999)
+            .expect("the stale id");
+        assert_eq!(
+            gone.error.as_deref(),
+            Some("that track is not in the library any more")
         );
     }
 }
